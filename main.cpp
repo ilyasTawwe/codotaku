@@ -20,6 +20,8 @@
 #include <drm/drm_fourcc.h>
 #include <xf86drm.h>
 
+#define GLM_FORCE_RADIANS
+#define GLM_FORCE_DEPTH_ZERO_TO_ONE
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -125,9 +127,10 @@ struct VertexOutput {
 [shader("vertex")]
 VertexOutput vsMain(VertexInput input) {
     VertexOutput output;
-    output.position = mul(pc.mvp, float4(input.position, 1.0));
+    // Multiplied in column-major order to match GLM memory layout
+    output.position = mul(float4(input.position, 1.0), pc.mvp);
     output.color = input.color * pc.tint;
-    output.normal = normalize(mul((float3x3)pc.model, input.normal));
+    output.normal = normalize(mul(input.normal, (float3x3)pc.model));
     return output;
 }
 
@@ -1567,7 +1570,7 @@ void create_shared_graphics_pipeline(VulkanContext& vk) {
         .rasterizerDiscardEnable = VK_FALSE,
         .polygonMode = VK_POLYGON_MODE_FILL,
         .cullMode = VK_CULL_MODE_BACK_BIT,
-        .frontFace = VK_FRONT_FACE_CLOCKWISE,
+        .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
         .lineWidth = 1.0f,
     };
 
