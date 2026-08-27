@@ -117,8 +117,10 @@ add_custom_command(
     VERBATIM
 )
 
-add_executable(codotaku
-    main.cpp
+# ==============================================================================
+# Codotaku Library Target
+# ==============================================================================
+add_library(codotaku STATIC
     "${VOLK_C}"
     "${XDG_SHELL_HEADER}"
     "${XDG_SHELL_CODE}"
@@ -128,27 +130,53 @@ add_executable(codotaku
     "${SYNCOBJ_CODE}"
     "${XDG_DECORATION_HEADER}"
     "${XDG_DECORATION_CODE}"
+    src/vulkan/context.cpp
+    src/vulkan/arena.cpp
+    src/vulkan/sync.cpp
+    src/vulkan/pipeline.cpp
+    src/wayland/context.cpp
+    src/wayland/window.cpp
+    src/shader/slang_compiler.cpp
+    src/app/application.cpp
 )
 
-target_include_directories(codotaku PRIVATE
-    "${CMAKE_CURRENT_BINARY_DIR}"
-    "${SLANG_INCLUDE_DIR}"
+add_library(codotaku::codotaku ALIAS codotaku)
+
+target_include_directories(codotaku
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
+        $<BUILD_INTERFACE:${SLANG_INCLUDE_DIR}>
+        $<INSTALL_INTERFACE:include>
 )
 
-target_compile_definitions(codotaku PRIVATE
-    VK_USE_PLATFORM_WAYLAND_KHR
+target_compile_definitions(codotaku
+    PUBLIC
+        VK_USE_PLATFORM_WAYLAND_KHR
 )
 
 target_compile_options(codotaku PRIVATE
     -Wno-nullability-completeness
 )
 
-target_link_libraries(codotaku PRIVATE
-    volk::volk_headers
-    Vulkan::Headers
-    GPUOpen::VulkanMemoryAllocator
-    glm::glm
-    "${SLANG_COMPILER_LIBRARY}"
-    PkgConfig::WAYLAND
-    PkgConfig::DRM
+target_link_libraries(codotaku
+    PUBLIC
+        volk::volk_headers
+        Vulkan::Headers
+        GPUOpen::VulkanMemoryAllocator
+        glm::glm
+        "${SLANG_COMPILER_LIBRARY}"
+        PkgConfig::WAYLAND
+        PkgConfig::DRM
+)
+
+# ==============================================================================
+# Example Target
+# ==============================================================================
+add_executable(codotaku_example
+    examples/multiwindow_cubes/main.cpp
+)
+
+target_link_libraries(codotaku_example PRIVATE
+    codotaku::codotaku
 )

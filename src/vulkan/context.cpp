@@ -1,0 +1,298 @@
+#include <algorithm>
+#include <cstring>
+#include <fcntl.h>
+#include <print>
+#include <stdexcept>
+#include <unistd.h>
+
+#include <volk.h>
+#define VMA_IMPLEMENTATION
+#include <vk_mem_alloc.h>
+
+#include <codotaku/vulkan/context.hpp>
+
+namespace codotaku {
+
+namespace {
+
+static VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback(
+    VkDebugUtilsMessageSeverityFlagBitsEXT severity,
+    VkDebugUtilsMessageTypeFlagsEXT,
+    const VkDebugUtilsMessengerCallbackDataEXT* callback_data,
+    void*) {
+    if (severity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) {
+        std::println(stderr, "[Vulkan Error]: {}", callback_data->pMessage);
+    } else if (severity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) {
+        std::println(stderr, "[Vulkan Warning]: {}", callback_data->pMessage);
+    }
+    return VK_FALSE;
+}
+
+} // namespace
+
+VulkanContext::VulkanContext() {
+    init_instance();
+    select_physical_device();
+    create_logical_device();
+    init_vma();
+    open_drm_node();
+}
+
+VulkanContext::~VulkanContext() {
+    cleanup();
+}
+
+void VulkanContext::init_instance() {
+    if (volkInitialize() != VK_SUCCESS) {
+        throw std::runtime_error("Failed to initialize Volk");
+    }
+
+    VkApplicationInfo app_info{
+        .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
+        .pApplicationName = "Codotaku App",
+        .applicationVersion = VK_MAKE_VERSION(1, 0, 0),
+        .pEngineName = "Codotaku Engine",
+        .engineVersion = VK_MAKE_VERSION(1, 0, 0),
+        .apiVersion = VK_API_VERSION_1_4,
+    };
+
+    uint32_t layer_count = 0;
+    vkEnumerateInstanceLayerProperties(&layer_count, nullptr);
+    std::vector<VkLayerProperties> available_layers(layer_count);
+    vkEnumerateInstanceLayerProperties(&layer_count, available_layers.data());
+
+    std::vector<const char*> enabled_layers;
+    const char* validation_layer = "VK_LAYER_KHRONOS_validation";
+    bool validation_found = std::ranges::any_of(available_layers, [&](const auto& layer) {
+        return std::strcmp(layer.layerName, validation_layer) == 0;
+    });
+
+    if (validation_found) {
+        enabled_layers.push_back(validation_layer);
+        std::println("[Codotaku] Enabled Vulkan validation layer: {}", validation_layer);
+    }
+
+    uint32_t ext_count = 0;
+    vkEnumerateInstanceExtensionProperties(nullptr, &ext_count, nullptr);
+    std::vector<VkExtensionProperties> available_extensions(ext_count);
+    vkEnumerateInstanceExtensionProperties(nullptr, &ext_count, available_extensions.data());
+
+    std::vector<const char*> enabled_extensions;
+    bool debug_utils_found = std::ranges::any_of(available_extensions, [&](const auto& ext) {
+        return std::strcmp(ext.extensionName, VK_EXT_DEBUG_UTILS_EXTENSION_NAME) == 0;
+    });
+
+    if (debug_utils_found) {
+        enabled_extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+    }
+
+    VkDebugUtilsMessengerCreateInfoEXT debug_create_info{
+        .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+        .messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+                           VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
+        .messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+                       VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+                       VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
+        .pfnUserCallback = debug_callback,
+    };
+
+    VkInstanceCreateInfo create_info{
+        .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+        .pNext = debug_utils_found ? &debug_create_info : nullptr,
+        .pApplicationInfo = &app_info,
+        .enabledLayerCount = static_cast<uint32_t>(enabled_layers.size()),
+        .ppEnabledLayerNames = enabled_layers.data(),
+        .enabledExtensionCount = static_cast<uint32_t>(enabled_extensions.size()),
+        .ppEnabledExtensionNames = enabled_extensions.data(),
+    };
+
+    if (vkCreateInstance(&create_info, nullptr, &m_instance) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create Vulkan instance");
+    }
+
+    volkLoadInstance(m_instance);
+
+    if (debug_utils_found && vkCreateDebugUtilsMessengerEXT) {
+        vkCreateDebugUtilsMessengerEXT(m_instance, &debug_create_info, nullptr, &m_debug_messenger);
+    }
+}
+
+void VulkanContext::select_physical_device() {
+    uint32_t device_count = 0;
+    vkEnumeratePhysicalDevices(m_instance, &device_count, nullptr);
+    if (device_count == 0) {
+        throw std::runtime_error("No Vulkan capable GPU found");
+    }
+
+    std::vector<VkPhysicalDevice> devices(device_count);
+    vkEnumeratePhysicalDevices(m_instance, &device_count, devices.data());
+
+    for (const auto& device : devices) {
+        uint32_t queue_family_count = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, nullptr);
+        std::vector<VkQueueFamilyProperties> queue_families(queue_family_count);
+        vkGetPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, queue_families.data());
+
+        for (uint32_t i = 0; i < queue_family_count; ++i) {
+            if (queue_families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
+                m_physical_device = device;
+                m_queue_family_index = i;
+                break;
+            }
+        }
+        if (m_physical_device != VK_NULL_HANDLE) {
+            break;
+        }
+    }
+
+    if (m_physical_device == VK_NULL_HANDLE) {
+        throw std::runtime_error("Failed to find a suitable GPU with Graphics support");
+    }
+
+    vkGetPhysicalDeviceMemoryProperties(m_physical_device, &m_memory_properties);
+
+    VkPhysicalDeviceProperties props;
+    vkGetPhysicalDeviceProperties(m_physical_device, &props);
+    std::println("[Codotaku] Selected GPU: {}", props.deviceName);
+}
+
+void VulkanContext::create_logical_device() {
+    float queue_priority = 1.0f;
+    VkDeviceQueueCreateInfo queue_create_info{
+        .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+        .queueFamilyIndex = m_queue_family_index,
+        .queueCount = 1,
+        .pQueuePriorities = &queue_priority,
+    };
+
+    const std::vector<const char*> device_extensions = {
+        VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
+        VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME,
+        VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME,
+        VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME,
+    };
+
+    VkPhysicalDeviceFeatures features{
+        .shaderInt64 = VK_TRUE,
+        .shaderInt16 = VK_TRUE,
+    };
+
+    VkPhysicalDeviceVulkan11Features vulkan11_features{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
+        .shaderDrawParameters = VK_TRUE,
+    };
+
+    VkPhysicalDeviceVulkan12Features vulkan12_features{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+        .pNext = &vulkan11_features,
+        .scalarBlockLayout = VK_TRUE,
+        .bufferDeviceAddress = VK_TRUE,
+    };
+
+    VkPhysicalDeviceVulkan13Features vulkan13_features{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+        .pNext = &vulkan12_features,
+        .synchronization2 = VK_TRUE,
+        .dynamicRendering = VK_TRUE,
+    };
+
+    VkDeviceCreateInfo device_create_info{
+        .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+        .pNext = &vulkan13_features,
+        .queueCreateInfoCount = 1,
+        .pQueueCreateInfos = &queue_create_info,
+        .enabledExtensionCount = static_cast<uint32_t>(device_extensions.size()),
+        .ppEnabledExtensionNames = device_extensions.data(),
+        .pEnabledFeatures = &features,
+    };
+
+    if (vkCreateDevice(m_physical_device, &device_create_info, nullptr, &m_device) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create Vulkan logical device with Buffer Device Address");
+    }
+
+    volkLoadDevice(m_device);
+    vkGetDeviceQueue(m_device, m_queue_family_index, 0, &m_queue);
+}
+
+void VulkanContext::init_vma() {
+    VmaVulkanFunctions vulkan_functions{};
+    VmaAllocatorCreateInfo allocator_info{
+        .flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT,
+        .physicalDevice = m_physical_device,
+        .device = m_device,
+        .instance = m_instance,
+        .vulkanApiVersion = VK_API_VERSION_1_4,
+    };
+
+    if (vmaImportVulkanFunctionsFromVolk(&allocator_info, &vulkan_functions) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to import Vulkan functions for VMA from Volk");
+    }
+
+    allocator_info.pVulkanFunctions = &vulkan_functions;
+
+    if (vmaCreateAllocator(&allocator_info, &m_allocator) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create Vulkan Memory Allocator (VMA)");
+    }
+}
+
+void VulkanContext::open_drm_node() {
+    m_drm_fd = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
+    if (m_drm_fd < 0) {
+        m_drm_fd = open("/dev/dri/card1", O_RDWR | O_CLOEXEC);
+    }
+    if (m_drm_fd < 0) {
+        throw std::runtime_error("Failed to open DRM device node");
+    }
+}
+
+uint32_t VulkanContext::find_memory_type(uint32_t type_filter, VkMemoryPropertyFlags properties) const {
+    for (uint32_t i = 0; i < m_memory_properties.memoryTypeCount; ++i) {
+        if ((type_filter & (1 << i)) && (m_memory_properties.memoryTypes[i].propertyFlags & properties) == properties) {
+            return i;
+        }
+    }
+    for (uint32_t i = 0; i < m_memory_properties.memoryTypeCount; ++i) {
+        if (type_filter & (1 << i)) {
+            return i;
+        }
+    }
+    throw std::runtime_error("Failed to find suitable memory type");
+}
+
+VkDeviceAddress VulkanContext::get_buffer_device_address(VkBuffer buffer) const {
+    VkBufferDeviceAddressInfo info{
+        .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
+        .buffer = buffer,
+    };
+    return vkGetBufferDeviceAddress(m_device, &info);
+}
+
+void VulkanContext::cleanup() {
+    if (m_device != VK_NULL_HANDLE) {
+        vkDeviceWaitIdle(m_device);
+
+        if (m_drm_fd >= 0) {
+            close(m_drm_fd);
+            m_drm_fd = -1;
+        }
+
+        if (m_allocator != VK_NULL_HANDLE) {
+            vmaDestroyAllocator(m_allocator);
+            m_allocator = VK_NULL_HANDLE;
+        }
+
+        vkDestroyDevice(m_device, nullptr);
+        m_device = VK_NULL_HANDLE;
+    }
+
+    if (m_instance != VK_NULL_HANDLE) {
+        if (m_debug_messenger != VK_NULL_HANDLE && vkDestroyDebugUtilsMessengerEXT) {
+            vkDestroyDebugUtilsMessengerEXT(m_instance, m_debug_messenger, nullptr);
+            m_debug_messenger = VK_NULL_HANDLE;
+        }
+        vkDestroyInstance(m_instance, nullptr);
+        m_instance = VK_NULL_HANDLE;
+    }
+}
+
+} // namespace codotaku
