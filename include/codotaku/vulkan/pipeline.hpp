@@ -25,12 +25,13 @@ public:
         VkCullModeFlags cull_mode = VK_CULL_MODE_BACK_BIT,
         VkFrontFace front_face = VK_FRONT_FACE_COUNTER_CLOCKWISE);
 
-    void cleanup(VkDevice device);
+    void cleanup();
 
     VkPipeline get_pipeline() const { return m_pipeline; }
     VkPipelineLayout get_layout() const { return m_layout; }
 
 private:
+    VkDevice m_device{VK_NULL_HANDLE};
     VkPipeline m_pipeline{VK_NULL_HANDLE};
     VkPipelineLayout m_layout{VK_NULL_HANDLE};
 };

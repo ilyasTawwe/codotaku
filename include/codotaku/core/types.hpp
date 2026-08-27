@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -9,9 +11,25 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
+#include <volk.h>
+#include <drm/drm_fourcc.h>
+
 namespace codotaku {
 
-constexpr size_t BUFFER_POOL_SIZE = 3;
+constexpr size_t DEFAULT_BUFFER_COUNT = 3;
+
+enum class PresentMode {
+    Fifo,       // VSync ON (throttled to monitor refresh cycle)
+    Immediate   // VSync OFF / Uncapped (low latency)
+};
+
+struct ColorFormat {
+    VkFormat vk_format{VK_FORMAT_B8G8R8A8_UNORM};
+    uint32_t drm_fourcc{DRM_FORMAT_ARGB8888};
+    std::vector<uint64_t> available_modifiers;
+};
+
+using FormatSelector = std::function<ColorFormat(std::span<const ColorFormat> available_formats)>;
 
 struct Vertex {
     glm::vec3 pos;
@@ -19,21 +37,13 @@ struct Vertex {
     glm::vec3 normal;
 };
 
-struct SceneData {
-    glm::mat4 mvp;
-    glm::mat4 model;
-    glm::vec3 tint;
-    float _pad{0.0f};
-    uint64_t vertexBufferAddress{0};
-    uint64_t indexBufferAddress{0};
-};
-
 struct WindowConfig {
     std::string title{"Codotaku Window"};
     uint32_t width{800};
     uint32_t height{600};
-    float rotation_speed{1.0f};
-    glm::vec3 tint{1.0f, 1.0f, 1.0f};
+    size_t buffer_count{DEFAULT_BUFFER_COUNT};
+    PresentMode present_mode{PresentMode::Fifo};
+    FormatSelector format_selector{nullptr};
 };
 
 } // namespace codotaku

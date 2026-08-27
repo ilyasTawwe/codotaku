@@ -6,7 +6,6 @@
 #include <unistd.h>
 
 #include <codotaku/wayland/window.hpp>
-#include <drm/drm_fourcc.h>
 
 namespace codotaku {
 
@@ -50,18 +49,103 @@ const zxdg_toplevel_decoration_v1_listener decoration_listener = {
 
 } // namespace
 
+void FrameContext::begin_rendering(VkClearColorValue clear_color, float clear_depth) const {
+    VkRenderingAttachmentInfo color_attachment{
+        .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        .imageView = color_image_view,
+        .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+        .clearValue = {
+            .color = clear_color,
+        },
+    };
+
+    VkRenderingAttachmentInfo depth_attachment{
+        .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        .imageView = depth_image_view,
+        .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+        .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+        .clearValue = {
+            .depthStencil = { clear_depth, 0 },
+        },
+    };
+
+    VkRenderingInfo rendering_info{
+        .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+        .renderArea = {
+            .offset = {0, 0},
+            .extent = {width, height},
+        },
+        .layerCount = 1,
+        .colorAttachmentCount = 1,
+        .pColorAttachments = &color_attachment,
+        .pDepthAttachment = &depth_attachment,
+    };
+
+    vkCmdBeginRendering(cmd, &rendering_info);
+}
+
+void FrameContext::end_rendering() const {
+    vkCmdEndRendering(cmd);
+}
+
+void FrameContext::set_viewport_and_scissor() const {
+    VkViewport viewport{
+        .x = 0.0f,
+        .y = 0.0f,
+        .width = static_cast<float>(width),
+        .height = static_cast<float>(height),
+        .minDepth = 0.0f,
+        .maxDepth = 1.0f,
+    };
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+
+    VkRect2D scissor{
+        .offset = {0, 0},
+        .extent = {width, height},
+    };
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+}
+
 Window::Window(WaylandContext& wl, VulkanContext& vk, WindowConfig config)
     : m_config(std::move(config)), m_width(m_config.width), m_height(m_config.height) {
+    if (m_config.buffer_count < 2) {
+        m_config.buffer_count = 2;
+    }
+
     init_wayland_surface(wl);
     init_drm_syncobj_timelines(wl, vk);
+    choose_color_format(wl);
     create_dmabuf_buffers(wl, vk);
     create_depth_buffer(vk);
     init_frame_arena(vk);
     create_command_resources(vk);
 }
 
-Window::~Window() {
-    // Rely on explicit cleanup() in Application or context shutdown
+Window::~Window() = default;
+
+void Window::choose_color_format(WaylandContext& wl) {
+    const auto& available = wl.get_available_color_formats();
+    if (available.empty()) {
+        m_chosen_format = {
+            .vk_format = VK_FORMAT_B8G8R8A8_UNORM,
+            .drm_fourcc = DRM_FORMAT_ARGB8888,
+            .available_modifiers = { DRM_FORMAT_MOD_LINEAR },
+        };
+        return;
+    }
+
+    if (m_config.format_selector) {
+        m_chosen_format = m_config.format_selector(available);
+    } else {
+        // Default selector: pick standard B8G8R8A8_UNORM (ARGB8888 or XRGB8888)
+        auto it = std::find_if(available.begin(), available.end(), [](const ColorFormat& cf) {
+            return cf.vk_format == VK_FORMAT_B8G8R8A8_UNORM;
+        });
+        m_chosen_format = (it != available.end()) ? *it : available.front();
+    }
 }
 
 void Window::init_wayland_surface(WaylandContext& wl) {
@@ -102,14 +186,14 @@ void Window::init_drm_syncobj_timelines(WaylandContext& wl, VulkanContext& vk) {
 }
 
 void Window::create_dmabuf_buffers(WaylandContext& wl, VulkanContext& vk) {
-    m_buffers.resize(BUFFER_POOL_SIZE);
+    m_buffers.resize(m_config.buffer_count);
 
-    std::vector<uint64_t> modifiers = wl.get_supported_modifiers();
+    std::vector<uint64_t> modifiers = m_chosen_format.available_modifiers;
     if (modifiers.empty()) {
         modifiers.push_back(DRM_FORMAT_MOD_LINEAR);
     }
 
-    for (size_t i = 0; i < BUFFER_POOL_SIZE; ++i) {
+    for (size_t i = 0; i < m_config.buffer_count; ++i) {
         auto& buf = m_buffers[i];
 
         VkExternalMemoryImageCreateInfo external_img_info{
@@ -128,7 +212,7 @@ void Window::create_dmabuf_buffers(WaylandContext& wl, VulkanContext& vk) {
             .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
             .pNext = &mod_list,
             .imageType = VK_IMAGE_TYPE_2D,
-            .format = VK_FORMAT_B8G8R8A8_UNORM,
+            .format = m_chosen_format.vk_format,
             .extent = { m_width, m_height, 1 },
             .mipLevels = 1,
             .arrayLayers = 1,
@@ -216,7 +300,7 @@ void Window::create_dmabuf_buffers(WaylandContext& wl, VulkanContext& vk) {
             params,
             m_width,
             m_height,
-            DRM_FORMAT_ARGB8888,
+            m_chosen_format.drm_fourcc,
             0);
         zwp_linux_buffer_params_v1_destroy(params);
 
@@ -228,7 +312,7 @@ void Window::create_dmabuf_buffers(WaylandContext& wl, VulkanContext& vk) {
             .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
             .image = buf.image,
             .viewType = VK_IMAGE_VIEW_TYPE_2D,
-            .format = VK_FORMAT_B8G8R8A8_UNORM,
+            .format = m_chosen_format.vk_format,
             .components = {
                 .r = VK_COMPONENT_SWIZZLE_IDENTITY,
                 .g = VK_COMPONENT_SWIZZLE_IDENTITY,
@@ -361,30 +445,30 @@ void Window::create_command_resources(VulkanContext& vk) {
         throw std::runtime_error("Failed to create Vulkan command pool for window: " + m_config.title);
     }
 
-    m_command_buffers.resize(BUFFER_POOL_SIZE);
+    m_command_buffers.resize(m_config.buffer_count);
     VkCommandBufferAllocateInfo alloc_info{
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
         .commandPool = m_command_pool,
         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-        .commandBufferCount = static_cast<uint32_t>(BUFFER_POOL_SIZE),
+        .commandBufferCount = static_cast<uint32_t>(m_config.buffer_count),
     };
 
     if (vkAllocateCommandBuffers(vk.get_device(), &alloc_info, m_command_buffers.data()) != VK_SUCCESS) {
         throw std::runtime_error("Failed to allocate command buffers for window: " + m_config.title);
     }
 
-    m_in_flight_fences.resize(BUFFER_POOL_SIZE);
+    m_in_flight_fences.resize(m_config.buffer_count);
     VkFenceCreateInfo fence_info{
         .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
         .flags = VK_FENCE_CREATE_SIGNALED_BIT,
     };
-    for (size_t i = 0; i < BUFFER_POOL_SIZE; ++i) {
+    for (size_t i = 0; i < m_config.buffer_count; ++i) {
         if (vkCreateFence(vk.get_device(), &fence_info, nullptr, &m_in_flight_fences[i]) != VK_SUCCESS) {
             throw std::runtime_error("Failed to create in-flight fence");
         }
     }
 
-    m_render_complete_semaphores.resize(BUFFER_POOL_SIZE);
+    m_render_complete_semaphores.resize(m_config.buffer_count);
     VkExportSemaphoreCreateInfo export_sem_info{
         .sType = VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO,
         .handleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT,
@@ -393,7 +477,7 @@ void Window::create_command_resources(VulkanContext& vk) {
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
         .pNext = &export_sem_info,
     };
-    for (size_t i = 0; i < BUFFER_POOL_SIZE; ++i) {
+    for (size_t i = 0; i < m_config.buffer_count; ++i) {
         if (vkCreateSemaphore(vk.get_device(), &sem_info, nullptr, &m_render_complete_semaphores[i]) != VK_SUCCESS) {
             throw std::runtime_error("Failed to create persistent exportable semaphore");
         }
@@ -465,20 +549,11 @@ void Window::handle_close() {
     std::println("[Codotaku] Window '{}' closed.", m_config.title);
 }
 
-void Window::render_frame(
-    WaylandContext& wl,
-    VulkanContext& vk,
-    VkPipeline pipeline,
-    VkPipelineLayout pipeline_layout,
-    VkDeviceAddress vertex_address,
-    VkDeviceAddress index_address,
-    uint32_t index_count,
-    std::chrono::steady_clock::time_point start_time) {
-    if (!m_open || !m_configured) return;
+std::optional<FrameContext> Window::begin_frame(VulkanContext& vk) {
+    if (!m_open || !m_configured) return std::nullopt;
 
-    if (m_need_resize) {
-        m_need_resize = false;
-        recreate_buffers(wl, vk);
+    if (m_current_buffer_idx == 0) {
+        m_frame_arena.reset();
     }
 
     auto& buf = m_buffers[m_current_buffer_idx];
@@ -498,17 +573,6 @@ void Window::render_frame(
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
     };
     vkBeginCommandBuffer(cmd, &begin_info);
-
-    auto now = std::chrono::steady_clock::now();
-    float time_sec = std::chrono::duration<float>(now - start_time).count();
-    VkClearColorValue clear_color = {
-        .float32 = {
-            0.06f + 0.03f * std::sin(time_sec),
-            0.06f + 0.03f * std::sin(time_sec + 2.0f),
-            0.09f + 0.03f * std::sin(time_sec + 4.0f),
-            1.0f
-        }
-    };
 
     VkImageSubresourceRange color_subresource_range{
         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
@@ -564,110 +628,30 @@ void Window::render_frame(
 
     vkCmdPipelineBarrier2(cmd, &dep_pre_render);
 
-    // Dynamic Rendering pass
-    VkRenderingAttachmentInfo color_attachment{
-        .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        .imageView = buf.view,
-        .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-        .clearValue = {
-            .color = clear_color,
-        },
-    };
-
-    VkRenderingAttachmentInfo depth_attachment{
-        .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        .imageView = m_depth.view,
-        .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-        .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-        .clearValue = {
-            .depthStencil = { 1.0f, 0 },
-        },
-    };
-
-    VkRenderingInfo rendering_info{
-        .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
-        .renderArea = {
-            .offset = {0, 0},
-            .extent = {m_width, m_height},
-        },
-        .layerCount = 1,
-        .colorAttachmentCount = 1,
-        .pColorAttachments = &color_attachment,
-        .pDepthAttachment = &depth_attachment,
-    };
-
-    vkCmdBeginRendering(cmd, &rendering_info);
-
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-
-    // 3D Matrix Computation
     float aspect = (m_height > 0) ? (static_cast<float>(m_width) / static_cast<float>(m_height)) : 1.0f;
-    glm::mat4 proj = glm::perspective(glm::radians(45.0f), aspect, 0.1f, 100.0f);
-    proj[1][1] *= -1.0f;
 
-    glm::mat4 view = glm::lookAt(
-        glm::vec3(0.0f, 1.2f, 2.8f),
-        glm::vec3(0.0f, 0.0f, 0.0f),
-        glm::vec3(0.0f, 1.0f, 0.0f)
-    );
-
-    glm::mat4 model = glm::mat4(1.0f);
-    model = glm::rotate(model, time_sec * m_config.rotation_speed * 0.9f, glm::vec3(0.0f, 1.0f, 0.0f));
-    model = glm::rotate(model, time_sec * m_config.rotation_speed * 0.6f, glm::vec3(1.0f, 0.0f, 0.0f));
-    model = glm::rotate(model, time_sec * m_config.rotation_speed * 0.3f, glm::vec3(0.0f, 0.0f, 1.0f));
-
-    glm::mat4 mvp = proj * view * model;
-
-    // Suballocate SceneData in Dynamic Frame Arena
-    VkDeviceSize scene_offset = m_current_buffer_idx * 256;
-    SceneData scene_data{
-        .mvp = mvp,
-        .model = model,
-        .tint = m_config.tint,
-        ._pad = 0.0f,
-        .vertexBufferAddress = vertex_address,
-        .indexBufferAddress = index_address,
+    return FrameContext{
+        .cmd = cmd,
+        .color_image_view = buf.view,
+        .depth_image_view = m_depth.view,
+        .width = m_width,
+        .height = m_height,
+        .aspect_ratio = aspect,
+        .buffer_index = m_current_buffer_idx,
+        .frame_arena = m_frame_arena,
     };
-    std::memcpy(static_cast<uint8_t*>(m_frame_arena.get_mapped_data()) + scene_offset, &scene_data, sizeof(SceneData));
+}
 
-    // Push 8-byte 64-bit Root Buffer GPU address
-    struct ShaderPushConstants {
-        uint64_t sceneDataAddress;
-    } pc = {
-        .sceneDataAddress = m_frame_arena.get_base_address() + scene_offset,
+void Window::submit_and_present(VulkanContext& vk, const FrameContext& frame) {
+    auto& buf = m_buffers[m_current_buffer_idx];
+
+    VkImageSubresourceRange color_subresource_range{
+        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+        .baseMipLevel = 0,
+        .levelCount = 1,
+        .baseArrayLayer = 0,
+        .layerCount = 1,
     };
-
-    vkCmdPushConstants(
-        cmd,
-        pipeline_layout,
-        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-        0,
-        sizeof(ShaderPushConstants),
-        &pc);
-
-    VkViewport viewport{
-        .x = 0.0f,
-        .y = 0.0f,
-        .width = static_cast<float>(m_width),
-        .height = static_cast<float>(m_height),
-        .minDepth = 0.0f,
-        .maxDepth = 1.0f,
-    };
-    vkCmdSetViewport(cmd, 0, 1, &viewport);
-
-    VkRect2D scissor{
-        .offset = {0, 0},
-        .extent = {m_width, m_height},
-    };
-    vkCmdSetScissor(cmd, 0, 1, &scissor);
-
-    // 100% Bindless Draw (pulls vertices & indices from Static Geometry Arena)
-    vkCmdDraw(cmd, index_count, 1, 0, 0);
-
-    vkCmdEndRendering(cmd);
 
     // Synchronization 2: Transition Color to GENERAL
     VkImageMemoryBarrier2 barrier_to_general{
@@ -690,14 +674,14 @@ void Window::render_frame(
         .pImageMemoryBarriers = &barrier_to_general,
     };
 
-    vkCmdPipelineBarrier2(cmd, &dep_to_general);
+    vkCmdPipelineBarrier2(frame.cmd, &dep_to_general);
 
-    vkEndCommandBuffer(cmd);
+    vkEndCommandBuffer(frame.cmd);
 
     VkSubmitInfo submit_info{
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
         .commandBufferCount = 1,
-        .pCommandBuffers = &cmd,
+        .pCommandBuffers = &frame.cmd,
         .signalSemaphoreCount = 1,
         .pSignalSemaphores = &m_render_complete_semaphores[m_current_buffer_idx],
     };
@@ -742,7 +726,7 @@ void Window::render_frame(
     wl_surface_damage_buffer(m_surface, 0, 0, m_width, m_height);
     wl_surface_commit(m_surface);
 
-    m_current_buffer_idx = (m_current_buffer_idx + 1) % BUFFER_POOL_SIZE;
+    m_current_buffer_idx = (m_current_buffer_idx + 1) % m_config.buffer_count;
 }
 
 } // namespace codotaku

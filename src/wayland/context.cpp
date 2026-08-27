@@ -3,21 +3,37 @@
 #include <stdexcept>
 
 #include <codotaku/wayland/context.hpp>
-#include <drm/drm_fourcc.h>
 
 namespace codotaku {
 
 namespace {
 
+VkFormat drm_fourcc_to_vk_format(uint32_t fourcc) {
+    switch (fourcc) {
+        case DRM_FORMAT_ARGB8888:
+        case DRM_FORMAT_XRGB8888:
+            return VK_FORMAT_B8G8R8A8_UNORM;
+        case DRM_FORMAT_ABGR8888:
+        case DRM_FORMAT_XBGR8888:
+            return VK_FORMAT_R8G8B8A8_UNORM;
+        case DRM_FORMAT_ARGB2101010:
+            return VK_FORMAT_A2R10G10B10_UNORM_PACK32;
+        case DRM_FORMAT_ABGR2101010:
+            return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+        case DRM_FORMAT_ABGR16161616F:
+            return VK_FORMAT_R16G16B16A16_SFLOAT;
+        default:
+            return VK_FORMAT_UNDEFINED;
+    }
+}
+
 void dmabuf_format_handler(void*, zwp_linux_dmabuf_v1*, uint32_t) {}
 
 void dmabuf_modifier_handler(void* data, zwp_linux_dmabuf_v1*, uint32_t format, uint32_t modifier_hi, uint32_t modifier_lo) {
     auto* ctx = static_cast<WaylandContext*>(data);
-    if (format == DRM_FORMAT_ARGB8888 || format == DRM_FORMAT_XRGB8888) {
-        uint64_t mod = (static_cast<uint64_t>(modifier_hi) << 32) | modifier_lo;
-        if (mod != DRM_FORMAT_MOD_INVALID) {
-            ctx->add_modifier(mod);
-        }
+    uint64_t mod = (static_cast<uint64_t>(modifier_hi) << 32) | modifier_lo;
+    if (mod != DRM_FORMAT_MOD_INVALID) {
+        ctx->add_format_modifier(format, mod);
     }
 }
 
@@ -56,8 +72,24 @@ WaylandContext::~WaylandContext() {
     cleanup();
 }
 
-void WaylandContext::add_modifier(uint64_t modifier) {
-    m_supported_modifiers.push_back(modifier);
+void WaylandContext::add_format_modifier(uint32_t drm_fourcc, uint64_t modifier) {
+    VkFormat vk_fmt = drm_fourcc_to_vk_format(drm_fourcc);
+    if (vk_fmt == VK_FORMAT_UNDEFINED) return;
+
+    m_modifier_map[drm_fourcc].push_back(modifier);
+
+    // Update color formats list
+    auto it = std::find_if(m_color_formats.begin(), m_color_formats.end(),
+                           [drm_fourcc](const ColorFormat& cf) { return cf.drm_fourcc == drm_fourcc; });
+    if (it != m_color_formats.end()) {
+        it->available_modifiers.push_back(modifier);
+    } else {
+        m_color_formats.push_back({
+            .vk_format = vk_fmt,
+            .drm_fourcc = drm_fourcc,
+            .available_modifiers = { modifier },
+        });
+    }
 }
 
 void WaylandContext::bind_global(wl_registry* registry, uint32_t name, const char* interface, uint32_t version) {

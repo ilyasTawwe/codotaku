@@ -8,7 +8,7 @@
 
 **Codotaku** is a modern, opinionated, swapchain-less C++26 library and engine framework designed for native Wayland and Vulkan 1.4+ rendering.
 
-Inspired by modern Linux presentation paradigms (such as NVIDIA's `egl-wayland2` and Chromium's native Wayland backend), Codotaku drops legacy Vulkan WSI swapchains in favor of **`linux-dmabuf`**, **DRM timeline syncobj explicit synchronization**, **Dynamic Rendering**, **Buffer Device Address (BDA) programmable vertex pulling**, and **runtime Slang shader reflection**.
+Inspired by modern Linux presentation paradigms (such as NVIDIA's `egl-wayland2` and Chromium's native Wayland backend), Codotaku removes platform and driver boilerplate while **giving users transparent, raw access to Vulkan command buffers, queues, and draw calls**.
 
 ---
 
@@ -24,13 +24,21 @@ Inspired by modern Linux presentation paradigms (such as NVIDIA's `egl-wayland2`
   - **Dynamic Rendering** (`vkCmdBeginRendering` / `vkCmdEndRendering`) — zero legacy render passes or framebuffers.
   - **Synchronization 2** (`vkCmdPipelineBarrier2`, `VkDependencyInfo`, `VkImageMemoryBarrier2`).
   - **Volk & VMA**: Volk meta-loader and Vulkan Memory Allocator integrated with Buffer Device Address support.
-- **Programmable Vertex Pulling via Buffer Device Address (BDA)**:
+- **GPU-Driven Indirect Drawing & Programmable Vertex Pulling (BDA)**:
+  - Supports `vkCmdDrawIndirect` and `vkCmdDrawIndexedIndirect` from GPU buffers.
   - 100% bindless vertex and index fetching via 64-bit GPU pointers (`(Vertex*)pc.vertexBufferAddress`).
   - Completely empty pipeline vertex input state (`vertexBindingDescriptionCount = 0`).
 - **Two-Buffer Arena Architecture (`VmaVirtualBlock`)**:
-  - **Static Geometry Arena**: 4 MB contiguous VRAM buffer managing suballocations for vertex/index geometry.
+  - **Static Geometry Arena**: 4 MB contiguous VRAM buffer managing suballocations for vertex/index geometry and indirect draw commands.
   - **Dynamic Frame Arena**: 64 KB host-mapped ring buffer for per-frame scene/transform data.
   - Compact **8-byte push constants** (`uint64_t sceneDataAddress`).
+- **Built-in 3D Camera & Scene Abstractions**:
+  - `codotaku::Camera`: Full perspective, view matrix (`lookAt`), orbit, zoom, and Vulkan NDC clip space alignment.
+  - `codotaku::SceneData`: Camera matrices, lighting parameters, and hierarchical BDA addresses.
+- **Configurable Presentation & Windowing Options**:
+  - Configurable double/triple buffering (`buffer_count`).
+  - VSync control (`PresentMode::Fifo` vs `PresentMode::Immediate`).
+  - Format selection lambda (`FormatSelector`) to negotiate custom 10-bit HDR or sRGB formats.
 - **Runtime Slang Shader Compilation & Reflection**:
   - Compiles Slang shaders to SPIR-V 1.5 at runtime.
   - Automatically reflects push constant ranges and memory structures.
@@ -49,14 +57,18 @@ codotaku/
 ├── include/
 │   └── codotaku/
 │       ├── codotaku.hpp                   # Master convenience include
-│       ├── core/types.hpp                 # Common structs (Vertex, SceneData, WindowConfig)
+│       ├── core/
+│       │   ├── types.hpp                  # Common structs (Vertex, WindowConfig, ColorFormat)
+│       │   ├── camera.hpp                 # 3D Camera (Perspective, LookAt, Orbit, Zoom)
+│       │   └── scene.hpp                  # SceneData & MeshHandle
 │       ├── wayland/
 │       │   ├── context.hpp                # Wayland display, registry, protocols
-│       │   └── window.hpp                 # Multi-window lifecycle, DMA-BUF pool, depth, rendering
+│       │   └── window.hpp                 # Multi-window lifecycle, FrameContext, DMA-BUF pool
 │       ├── vulkan/
 │       │   ├── context.hpp                # Vulkan 1.4 context, Volk, VMA, DRM node
 │       │   ├── arena.hpp                  # GpuBufferArena (VmaVirtualBlock suballocations)
 │       │   ├── sync.hpp                   # DRM syncobj timeline explicit synchronization
+│       │   ├── indirect.hpp               # Indirect draw command batch helper
 │       │   └── pipeline.hpp               # Dynamic rendering BDA graphics pipeline
 │       ├── shader/
 │       │   └── slang_compiler.hpp         # Runtime Slang compiler & push constant reflection
@@ -69,7 +81,7 @@ codotaku/
 │   └── app/     (application.cpp)
 └── examples/
     └── multiwindow_cubes/
-        └── main.cpp                       # Consumer example code (< 70 lines)
+        └── main.cpp                       # Consumer example code (< 80 lines)
 ```
 
 ---
@@ -116,85 +128,80 @@ cmake --build --preset release
 ```cpp
 #include <codotaku/codotaku.hpp>
 
-// Slang Shader with 64-bit Buffer Device Address (BDA) pointer dereferencing
-const char* SHADER_CODE = R"(
-struct Vertex {
-    float3 position;
-    float3 color;
-    float3 normal;
-};
-
-struct SceneData {
-    float4x4 mvp;
-    float4x4 model;
-    float3 tint;
-    float _pad;
-    uint64_t vertexBufferAddress;
-    uint64_t indexBufferAddress;
-};
-
-struct PushConstants {
-    uint64_t sceneDataAddress; // 8 bytes!
-};
-[[vk::push_constant]] PushConstants pc;
-
-struct VertexOutput {
-    float4 position : SV_Position;
-    float3 color : COLOR;
-    float3 normal : NORMAL;
-};
-
-[shader("vertex")]
-VertexOutput vsMain(uint indexID : SV_VertexID) {
-    SceneData* scene = (SceneData*)pc.sceneDataAddress;
-    uint16_t* indices = (uint16_t*)scene.indexBufferAddress;
-    Vertex* vertices = (Vertex*)scene.vertexBufferAddress;
-
-    uint vertexIndex = indices[indexID];
-    Vertex input = vertices[vertexIndex];
-
-    VertexOutput output;
-    output.position = mul(float4(input.position, 1.0), scene.mvp);
-    output.color = input.color * scene.tint;
-    output.normal = normalize(mul(input.normal, (float3x3)scene.model));
-    return output;
-}
-
-[shader("fragment")]
-float4 fsMain(VertexOutput input) : SV_Target {
-    float3 lightDir = normalize(float3(0.5, 0.8, 0.7));
-    float diff = max(dot(input.normal, lightDir), 0.0);
-    return float4((0.3 + diff) * input.color, 1.0);
-}
-)";
-
 int main() {
     try {
         codotaku::Application app("Codotaku Engine Demo");
 
-        // 1. Upload geometry to the Static Arena
-        app.set_mesh_data(CUBE_VERTICES, CUBE_INDICES);
+        // 1. Upload Mesh to the Static Geometry Arena
+        auto mesh = app.upload_mesh(CUBE_VERTICES, CUBE_INDICES);
 
-        // 2. Compile Slang shader & reflect pipeline
-        app.set_shader_source(SHADER_CODE);
+        // 2. Upload Indirect Draw Command to Static Arena
+        auto indirect_batch = app.upload_indirect_command({
+            .vertexCount = mesh.index_count,
+        });
 
-        // 3. Spawn independent Wayland 3D windows with custom styles
+        // 3. Compile Slang Shader & Create Dynamic Rendering Pipeline
+        auto pipeline = app.create_pipeline(SHADER_SLANG_CODE);
+
+        // 4. Create 3D Camera
+        codotaku::Camera camera({0.0f, 1.4f, 3.2f}, {0.0f, 0.0f, 0.0f});
+
+        // 5. Spawn Windows with configurable Buffer Count, VSync mode, and Format Selector
         app.create_window({
-            .title = "Window 1 (Cyan Theme)",
+            .title = "Window 1 (Triple Buffer, VSync ON, Cyan)",
             .width = 800, .height = 600,
-            .rotation_speed = 1.4f,
-            .tint = {0.4f, 1.0f, 1.0f}
+            .buffer_count = 3,
+            .present_mode = codotaku::PresentMode::Fifo,
+            .format_selector = [](auto available) { return available.front(); }
         });
 
         app.create_window({
-            .title = "Window 2 (Gold Theme)",
+            .title = "Window 2 (Double Buffer, Immediate, Gold)",
             .width = 600, .height = 600,
-            .rotation_speed = -1.0f,
-            .tint = {1.0f, 0.75f, 0.3f}
+            .buffer_count = 2,
+            .present_mode = codotaku::PresentMode::Immediate,
         });
 
-        // 4. Run non-blocking multi-window event loop
-        return app.run();
+        auto start_time = std::chrono::steady_clock::now();
+
+        // 6. Transparent, Non-intrusive Render Loop (User controls command recording & submission!)
+        return app.run([&](codotaku::Window& window, codotaku::FrameContext& frame) {
+            float time_sec = std::chrono::duration<float>(std::chrono::steady_clock::now() - start_time).count();
+
+            // Set camera aspect ratio matching the active window
+            camera.set_aspect_ratio(frame.aspect_ratio);
+
+            // Suballocate per-frame SceneData inside the window's dynamic frame arena
+            auto scene_suballoc = frame.frame_arena.suballocate(sizeof(codotaku::SceneData), 64);
+            auto* scene = reinterpret_cast<codotaku::SceneData*>(
+                static_cast<uint8_t*>(frame.frame_arena.get_mapped_data()) + scene_suballoc.offset);
+
+            scene->view_proj = camera.get_view_projection_matrix();
+            scene->view = camera.get_view_matrix();
+            scene->proj = camera.get_projection_matrix();
+            scene->camera_pos = camera.get_position();
+            scene->time = time_sec;
+            scene->vertexBufferAddress = mesh.vertex_address;
+            scene->indexBufferAddress = mesh.index_address;
+
+            // Direct Vulkan Dynamic Rendering pass!
+            frame.begin_rendering({.float32 = {0.05f, 0.05f, 0.08f, 1.0f}}, 1.0f);
+            frame.set_viewport_and_scissor();
+
+            vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.get_pipeline());
+
+            // Push 8-byte Root Scene BDA address
+            uint64_t scene_addr = scene_suballoc.device_address;
+            vkCmdPushConstants(frame.cmd, pipeline.get_layout(), 
+                               VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 
+                               0, sizeof(uint64_t), &scene_addr);
+
+            // GPU-Driven Indirect Draw!
+            vkCmdDrawIndirect(frame.cmd, app.get_geometry_arena().get_buffer(),
+                              indirect_batch.offset, indirect_batch.draw_count, indirect_batch.stride);
+
+            frame.end_rendering();
+        });
 
     } catch (const std::exception& e) {
         std::println(std::cerr, "Fatal error: {}", e.what());

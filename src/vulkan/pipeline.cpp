@@ -6,15 +6,18 @@
 namespace codotaku {
 
 Pipeline::~Pipeline() {
-    // Requires explicit cleanup() call with device or handled in higher level
+    cleanup();
 }
 
 Pipeline::Pipeline(Pipeline&& other) noexcept
-    : m_pipeline(std::exchange(other.m_pipeline, VK_NULL_HANDLE)),
+    : m_device(std::exchange(other.m_device, VK_NULL_HANDLE)),
+      m_pipeline(std::exchange(other.m_pipeline, VK_NULL_HANDLE)),
       m_layout(std::exchange(other.m_layout, VK_NULL_HANDLE)) {}
 
 Pipeline& Pipeline::operator=(Pipeline&& other) noexcept {
     if (this != &other) {
+        cleanup();
+        m_device = std::exchange(other.m_device, VK_NULL_HANDLE);
         m_pipeline = std::exchange(other.m_pipeline, VK_NULL_HANDLE);
         m_layout = std::exchange(other.m_layout, VK_NULL_HANDLE);
     }
@@ -28,10 +31,11 @@ void Pipeline::init_dynamic_rendering_bda(
     VkFormat depth_format,
     VkCullModeFlags cull_mode,
     VkFrontFace front_face) {
-    VkDevice device = vk.get_device();
+    cleanup();
+    m_device = vk.get_device();
 
-    VkShaderModule vs_module = create_shader_module(device, shaders.vs_spirv);
-    VkShaderModule fs_module = create_shader_module(device, shaders.fs_spirv);
+    VkShaderModule vs_module = create_shader_module(m_device, shaders.vs_spirv);
+    VkShaderModule fs_module = create_shader_module(m_device, shaders.fs_spirv);
 
     VkPipelineShaderStageCreateInfo shader_stages[] = {
         {
@@ -124,15 +128,17 @@ void Pipeline::init_dynamic_rendering_bda(
         .pPushConstantRanges = push_constants.data(),
     };
 
-    if (vkCreatePipelineLayout(device, &pipeline_layout_info, nullptr, &m_layout) != VK_SUCCESS) {
+    if (vkCreatePipelineLayout(m_device, &pipeline_layout_info, nullptr, &m_layout) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create pipeline layout");
     }
 
+    VkFormat color_fmt = color_format;
+    VkFormat depth_fmt = depth_format;
     VkPipelineRenderingCreateInfo pipeline_rendering_info{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
         .colorAttachmentCount = 1,
-        .pColorAttachmentFormats = &color_format,
-        .depthAttachmentFormat = depth_format,
+        .pColorAttachmentFormats = &color_fmt,
+        .depthAttachmentFormat = depth_fmt,
     };
 
     VkGraphicsPipelineCreateInfo pipeline_info{
@@ -152,22 +158,26 @@ void Pipeline::init_dynamic_rendering_bda(
         .renderPass = VK_NULL_HANDLE,
     };
 
-    if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &m_pipeline) != VK_SUCCESS) {
+    if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &m_pipeline) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create graphics pipeline for 3D dynamic rendering with BDA");
     }
 
-    vkDestroyShaderModule(device, fs_module, nullptr);
-    vkDestroyShaderModule(device, vs_module, nullptr);
+    vkDestroyShaderModule(m_device, fs_module, nullptr);
+    vkDestroyShaderModule(m_device, vs_module, nullptr);
 }
 
-void Pipeline::cleanup(VkDevice device) {
-    if (m_pipeline != VK_NULL_HANDLE) {
-        vkDestroyPipeline(device, m_pipeline, nullptr);
-        m_pipeline = VK_NULL_HANDLE;
-    }
-    if (m_layout != VK_NULL_HANDLE) {
-        vkDestroyPipelineLayout(device, m_layout, nullptr);
-        m_layout = VK_NULL_HANDLE;
+void Pipeline::cleanup() {
+    if (m_device != VK_NULL_HANDLE) {
+        vkDeviceWaitIdle(m_device);
+        if (m_pipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(m_device, m_pipeline, nullptr);
+            m_pipeline = VK_NULL_HANDLE;
+        }
+        if (m_layout != VK_NULL_HANDLE) {
+            vkDestroyPipelineLayout(m_device, m_layout, nullptr);
+            m_layout = VK_NULL_HANDLE;
+        }
+        m_device = VK_NULL_HANDLE;
     }
 }
 

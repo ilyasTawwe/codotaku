@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 #include <volk.h>
@@ -36,6 +37,21 @@ struct DepthBuffer {
     VmaAllocation allocation{VK_NULL_HANDLE};
 };
 
+struct FrameContext {
+    VkCommandBuffer cmd{VK_NULL_HANDLE};
+    VkImageView color_image_view{VK_NULL_HANDLE};
+    VkImageView depth_image_view{VK_NULL_HANDLE};
+    uint32_t width{0};
+    uint32_t height{0};
+    float aspect_ratio{1.0f};
+    size_t buffer_index{0};
+    GpuBufferArena& frame_arena;
+
+    void begin_rendering(VkClearColorValue clear_color, float clear_depth = 1.0f) const;
+    void end_rendering() const;
+    void set_viewport_and_scissor() const;
+};
+
 class Window {
 public:
     Window(WaylandContext& wl, VulkanContext& vk, WindowConfig config);
@@ -54,25 +70,18 @@ public:
         return (m_height > 0) ? (static_cast<float>(m_width) / static_cast<float>(m_height)) : 1.0f;
     }
     const std::string& get_title() const { return m_config.title; }
-    float get_rotation_speed() const { return m_config.rotation_speed; }
-    glm::vec3 get_tint() const { return m_config.tint; }
+    const ColorFormat& get_color_format() const { return m_chosen_format; }
 
     void handle_configure(uint32_t width, uint32_t height);
     void handle_close();
 
-    void render_frame(
-        WaylandContext& wl,
-        VulkanContext& vk,
-        VkPipeline pipeline,
-        VkPipelineLayout pipeline_layout,
-        VkDeviceAddress vertex_address,
-        VkDeviceAddress index_address,
-        uint32_t index_count,
-        std::chrono::steady_clock::time_point start_time);
+    std::optional<FrameContext> begin_frame(VulkanContext& vk);
+    void submit_and_present(VulkanContext& vk, const FrameContext& frame);
 
 private:
     void init_wayland_surface(WaylandContext& wl);
     void init_drm_syncobj_timelines(WaylandContext& wl, VulkanContext& vk);
+    void choose_color_format(WaylandContext& wl);
     void create_dmabuf_buffers(WaylandContext& wl, VulkanContext& vk);
     void cleanup_dmabuf_buffers(VulkanContext& vk);
     void create_depth_buffer(VulkanContext& vk);
@@ -84,6 +93,7 @@ private:
     WindowConfig m_config;
     uint32_t m_width{800};
     uint32_t m_height{600};
+    ColorFormat m_chosen_format{};
 
     bool m_configured{false};
     bool m_open{true};
