@@ -61,6 +61,12 @@ struct VertexInput {
     float3 color : COLOR;
 };
 
+struct PushConstants {
+    float time;
+    float scale;
+};
+[[vk::push_constant]] PushConstants pc;
+
 struct VertexOutput {
     float4 position : SV_Position;
     float3 color : COLOR;
@@ -69,7 +75,14 @@ struct VertexOutput {
 [shader("vertex")]
 VertexOutput vsMain(VertexInput input) {
     VertexOutput output;
-    output.position = float4(input.position, 0.0, 1.0);
+    float cos_t = cos(pc.time);
+    float sin_t = sin(pc.time);
+    float2 rotated = float2(
+        input.position.x * cos_t - input.position.y * sin_t,
+        input.position.x * sin_t + input.position.y * cos_t
+    ) * pc.scale;
+
+    output.position = float4(rotated, 0.0, 1.0);
     output.color = input.color;
     return output;
 }
@@ -735,12 +748,60 @@ void create_vertex_buffer(VulkanState& vk) {
     std::println("Created triangle vertex buffer via VMA ({} vertices)", TRIANGLE_VERTICES.size());
 }
 
-struct CompiledShaders {
-    std::vector<uint32_t> vs_spirv;
-    std::vector<uint32_t> fs_spirv;
+uint32_t get_vk_format_size(VkFormat format) {
+    switch (format) {
+        case VK_FORMAT_R32_SFLOAT: case VK_FORMAT_R32_SINT: case VK_FORMAT_R32_UINT: return 4;
+        case VK_FORMAT_R32G32_SFLOAT: case VK_FORMAT_R32G32_SINT: case VK_FORMAT_R32G32_UINT: return 8;
+        case VK_FORMAT_R32G32B32_SFLOAT: case VK_FORMAT_R32G32B32_SINT: case VK_FORMAT_R32G32B32_UINT: return 12;
+        case VK_FORMAT_R32G32B32A32_SFLOAT: case VK_FORMAT_R32G32B32A32_SINT: case VK_FORMAT_R32G32B32A32_UINT: return 16;
+        default: return 0;
+    }
+}
+
+VkFormat slang_type_to_vk_format(slang::TypeReflection* type) {
+    auto kind = type->getKind();
+    if (kind == slang::TypeReflection::Kind::Scalar) {
+        auto scalar = type->getScalarType();
+        if (scalar == slang::TypeReflection::ScalarType::Float32) return VK_FORMAT_R32_SFLOAT;
+        if (scalar == slang::TypeReflection::ScalarType::Int32) return VK_FORMAT_R32_SINT;
+        if (scalar == slang::TypeReflection::ScalarType::UInt32) return VK_FORMAT_R32_UINT;
+    } else if (kind == slang::TypeReflection::Kind::Vector) {
+        auto scalar = type->getScalarType();
+        auto count = type->getElementCount();
+        if (scalar == slang::TypeReflection::ScalarType::Float32) {
+            if (count == 2) return VK_FORMAT_R32G32_SFLOAT;
+            if (count == 3) return VK_FORMAT_R32G32B32_SFLOAT;
+            if (count == 4) return VK_FORMAT_R32G32B32A32_SFLOAT;
+        } else if (scalar == slang::TypeReflection::ScalarType::Int32) {
+            if (count == 2) return VK_FORMAT_R32G32_SINT;
+            if (count == 3) return VK_FORMAT_R32G32B32_SINT;
+            if (count == 4) return VK_FORMAT_R32G32B32A32_SINT;
+        } else if (scalar == slang::TypeReflection::ScalarType::UInt32) {
+            if (count == 2) return VK_FORMAT_R32G32_UINT;
+            if (count == 3) return VK_FORMAT_R32G32B32_UINT;
+            if (count == 4) return VK_FORMAT_R32G32B32A32_UINT;
+        }
+    }
+    return VK_FORMAT_UNDEFINED;
+}
+
+struct ReflectedVertexInput {
+    VkVertexInputBindingDescription binding{};
+    std::vector<VkVertexInputAttributeDescription> attributes;
 };
 
-CompiledShaders compile_slang_shader_source(const char* source) {
+struct ReflectedPipelineLayoutData {
+    std::vector<VkPushConstantRange> push_constants;
+};
+
+struct CompiledShadersWithReflection {
+    std::vector<uint32_t> vs_spirv;
+    std::vector<uint32_t> fs_spirv;
+    ReflectedVertexInput vertex_input;
+    ReflectedPipelineLayoutData pipeline_layout_data;
+};
+
+CompiledShadersWithReflection compile_slang_shader_source(const char* source) {
     Slang::ComPtr<slang::IGlobalSession> global_session;
     if (SLANG_FAILED(slang::createGlobalSession(global_session.writeRef()))) {
         throw std::runtime_error("Failed to create Slang global session");
@@ -786,7 +847,7 @@ CompiledShaders compile_slang_shader_source(const char* source) {
     Slang::ComPtr<slang::IBlob> fs_blob;
     linked_program->getEntryPointCode(1, 0, fs_blob.writeRef(), diagnostic_blob.writeRef());
 
-    CompiledShaders result{};
+    CompiledShadersWithReflection result{};
     auto copy_blob = [](slang::IBlob* blob, std::vector<uint32_t>& out) {
         size_t size_bytes = blob->getBufferSize();
         out.resize(size_bytes / sizeof(uint32_t));
@@ -795,6 +856,68 @@ CompiledShaders compile_slang_shader_source(const char* source) {
 
     copy_blob(vs_blob.get(), result.vs_spirv);
     copy_blob(fs_blob.get(), result.fs_spirv);
+
+    auto layout = linked_program->getLayout();
+
+    // 1. Reflect Vertex Input from Vertex Shader Entry Point
+    auto vs_layout = layout->findEntryPointByName("vsMain");
+    if (vs_layout && vs_layout->getParameterCount() > 0) {
+        auto param = vs_layout->getParameterByIndex(0);
+        auto type_layout = param->getTypeLayout();
+        uint32_t current_offset = 0;
+
+        for (unsigned f = 0; f < type_layout->getFieldCount(); ++f) {
+            auto field = type_layout->getFieldByIndex(f);
+            auto location = static_cast<uint32_t>(field->getOffset(slang::ParameterCategory::VaryingInput));
+            auto format = slang_type_to_vk_format(field->getType());
+            auto size = get_vk_format_size(format);
+
+            result.vertex_input.attributes.push_back({
+                .location = location,
+                .binding = 0,
+                .format = format,
+                .offset = current_offset,
+            });
+
+            std::println("  [Slang Reflection] Vertex Attribute {}: semantic='{}', location={}, offset={}, format={}",
+                f, field->getSemanticName() ? field->getSemanticName() : field->getName(),
+                location, current_offset, static_cast<int>(format));
+
+            current_offset += size;
+        }
+
+        result.vertex_input.binding = {
+            .binding = 0,
+            .stride = current_offset,
+            .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+        };
+        std::println("  [Slang Reflection] Vertex Input Stride: {} bytes", current_offset);
+    }
+
+    // 2. Reflect Push Constants and Global Parameters
+    for (unsigned i = 0; i < layout->getParameterCount(); ++i) {
+        auto param = layout->getParameterByIndex(i);
+        if (param->getCategory() == slang::ParameterCategory::PushConstantBuffer) {
+            auto elem_layout = param->getTypeLayout()->getElementTypeLayout();
+            uint32_t size = elem_layout ? static_cast<uint32_t>(elem_layout->getSize(slang::ParameterCategory::Uniform)) : 0;
+            if (size == 0) {
+                auto type_layout = param->getTypeLayout();
+                for (unsigned f = 0; f < type_layout->getFieldCount(); ++f) {
+                    auto field = type_layout->getFieldByIndex(f);
+                    size += get_vk_format_size(slang_type_to_vk_format(field->getType()));
+                }
+            }
+
+            result.pipeline_layout_data.push_constants.push_back({
+                .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                .offset = 0,
+                .size = size,
+            });
+
+            std::println("  [Slang Reflection] Push Constant Range: name='{}', size={} bytes",
+                param->getName(), size);
+        }
+    }
 
     std::println("Slang compiled shaders at runtime: VS {} bytes, FS {} bytes",
         result.vs_spirv.size() * sizeof(uint32_t),
@@ -836,33 +959,13 @@ void create_graphics_pipeline(VulkanState& vk) {
         },
     };
 
-    VkVertexInputBindingDescription binding_description{
-        .binding = 0,
-        .stride = sizeof(Vertex),
-        .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
-    };
-
-    VkVertexInputAttributeDescription attribute_descriptions[] = {
-        {
-            .location = 0,
-            .binding = 0,
-            .format = VK_FORMAT_R32G32_SFLOAT,
-            .offset = static_cast<uint32_t>(offsetof(Vertex, pos)),
-        },
-        {
-            .location = 1,
-            .binding = 0,
-            .format = VK_FORMAT_R32G32B32_SFLOAT,
-            .offset = static_cast<uint32_t>(offsetof(Vertex, color)),
-        },
-    };
-
+    // Automated Vertex Input from Slang Reflection
     VkPipelineVertexInputStateCreateInfo vertex_input_info{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
         .vertexBindingDescriptionCount = 1,
-        .pVertexBindingDescriptions = &binding_description,
-        .vertexAttributeDescriptionCount = 2,
-        .pVertexAttributeDescriptions = attribute_descriptions,
+        .pVertexBindingDescriptions = &compiled_shaders.vertex_input.binding,
+        .vertexAttributeDescriptionCount = static_cast<uint32_t>(compiled_shaders.vertex_input.attributes.size()),
+        .pVertexAttributeDescriptions = compiled_shaders.vertex_input.attributes.data(),
     };
 
     VkPipelineInputAssemblyStateCreateInfo input_assembly{
@@ -916,8 +1019,12 @@ void create_graphics_pipeline(VulkanState& vk) {
         .pDynamicStates = dynamic_states,
     };
 
+    // Automated Pipeline Layout from Slang Reflection
+    const auto& push_constants = compiled_shaders.pipeline_layout_data.push_constants;
     VkPipelineLayoutCreateInfo pipeline_layout_info{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .pushConstantRangeCount = static_cast<uint32_t>(push_constants.size()),
+        .pPushConstantRanges = push_constants.data(),
     };
 
     if (vkCreatePipelineLayout(vk.device, &pipeline_layout_info, nullptr, &vk.pipeline_layout) != VK_SUCCESS) {
@@ -953,7 +1060,7 @@ void create_graphics_pipeline(VulkanState& vk) {
 
     vkDestroyShaderModule(vk.device, fs_module, nullptr);
     vkDestroyShaderModule(vk.device, vs_module, nullptr);
-    std::println("Graphics pipeline created for Dynamic Rendering with Slang shaders.");
+    std::println("Graphics pipeline created via Slang Reflection automation.");
 }
 
 void create_command_resources(VulkanState& vk) {
@@ -1123,8 +1230,24 @@ void render_frame(WaylandState& wl, VulkanState& vk, std::chrono::steady_clock::
 
     vkCmdBeginRendering(cmd, &rendering_info);
 
-    // Draw RGB Triangle
+    // Draw RGB Triangle with Reflected Push Constants
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.pipeline);
+
+    struct ShaderPushConstants {
+        float time;
+        float scale;
+    } pc = {
+        .time = time_sec,
+        .scale = 0.8f + 0.15f * std::sin(time_sec * 2.0f),
+    };
+
+    vkCmdPushConstants(
+        cmd,
+        vk.pipeline_layout,
+        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        0,
+        sizeof(ShaderPushConstants),
+        &pc);
 
     VkViewport viewport{
         .x = 0.0f,
