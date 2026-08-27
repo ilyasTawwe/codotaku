@@ -3,6 +3,7 @@
 #include <utility>
 #include <vector>
 
+#include <codotaku/vulkan/device.hpp>
 #include <codotaku/vulkan/pipeline.hpp>
 
 namespace codotaku {
@@ -70,12 +71,7 @@ DescriptorBindingMapping Pipeline::map_storage_image(
 void Pipeline::init_dynamic_rendering_bda(
     VulkanDevice& vk,
     const CompiledShaders& shaders,
-    VkFormat color_format,
-    VkFormat depth_format,
-    const std::vector<DescriptorBindingMapping>& mappings,
-    VkCullModeFlags cull_mode,
-    VkFrontFace front_face,
-    const char* debug_name) {
+    const GraphicsPipelineConfig& config) {
     cleanup();
     m_device = vk.get_device();
     m_vkd = vk.vkd();
@@ -84,7 +80,7 @@ void Pipeline::init_dynamic_rendering_bda(
     VkShaderModule fs_module = create_shader_module(m_vkd, m_device, shaders.fs_spirv);
 
     std::vector<VkDescriptorSetAndBindingMappingEXT> vk_mappings;
-    for (const auto& m : mappings) {
+    for (const auto& m : config.mappings) {
         vk_mappings.push_back({
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_AND_BINDING_MAPPING_EXT,
             .pNext = nullptr,
@@ -161,21 +157,21 @@ void Pipeline::init_dynamic_rendering_bda(
         .flags = 0,
         .depthClampEnable = VK_FALSE,
         .rasterizerDiscardEnable = VK_FALSE,
-        .polygonMode = VK_POLYGON_MODE_FILL,
-        .cullMode = cull_mode,
-        .frontFace = front_face,
+        .polygonMode = config.polygon_mode,
+        .cullMode = config.cull_mode,
+        .frontFace = config.front_face,
         .depthBiasEnable = VK_FALSE,
         .depthBiasConstantFactor = 0.0f,
         .depthBiasClamp = 0.0f,
         .depthBiasSlopeFactor = 0.0f,
-        .lineWidth = 1.0f,
+        .lineWidth = config.line_width,
     };
 
     VkPipelineMultisampleStateCreateInfo multisampling{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
         .pNext = nullptr,
         .flags = 0,
-        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+        .rasterizationSamples = config.samples,
         .sampleShadingEnable = VK_FALSE,
         .minSampleShading = 1.0f,
         .pSampleMask = nullptr,
@@ -187,9 +183,9 @@ void Pipeline::init_dynamic_rendering_bda(
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
         .pNext = nullptr,
         .flags = 0,
-        .depthTestEnable = (depth_format != VK_FORMAT_UNDEFINED) ? VK_TRUE : VK_FALSE,
-        .depthWriteEnable = (depth_format != VK_FORMAT_UNDEFINED) ? VK_TRUE : VK_FALSE,
-        .depthCompareOp = VK_COMPARE_OP_LESS,
+        .depthTestEnable = config.depth_test_enable ? VK_TRUE : VK_FALSE,
+        .depthWriteEnable = config.depth_write_enable ? VK_TRUE : VK_FALSE,
+        .depthCompareOp = config.depth_compare_op,
         .depthBoundsTestEnable = VK_FALSE,
         .stencilTestEnable = VK_FALSE,
         .front = {},
@@ -198,16 +194,7 @@ void Pipeline::init_dynamic_rendering_bda(
         .maxDepthBounds = 1.0f,
     };
 
-    VkPipelineColorBlendAttachmentState color_blend_attachment{
-        .blendEnable = VK_FALSE,
-        .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
-        .dstColorBlendFactor = VK_BLEND_FACTOR_ZERO,
-        .colorBlendOp = VK_BLEND_OP_ADD,
-        .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
-        .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
-        .alphaBlendOp = VK_BLEND_OP_ADD,
-        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
-    };
+    VkPipelineColorBlendAttachmentState color_blend_attachment = config.blend_attachment;
 
     VkPipelineColorBlendStateCreateInfo color_blending{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
@@ -215,8 +202,8 @@ void Pipeline::init_dynamic_rendering_bda(
         .flags = 0,
         .logicOpEnable = VK_FALSE,
         .logicOp = VK_LOGIC_OP_COPY,
-        .attachmentCount = (color_format != VK_FORMAT_UNDEFINED) ? 1u : 0u,
-        .pAttachments = (color_format != VK_FORMAT_UNDEFINED) ? &color_blend_attachment : nullptr,
+        .attachmentCount = (config.color_format != VK_FORMAT_UNDEFINED) ? 1u : 0u,
+        .pAttachments = (config.color_format != VK_FORMAT_UNDEFINED) ? &color_blend_attachment : nullptr,
         .blendConstants = {0.0f, 0.0f, 0.0f, 0.0f},
     };
 
@@ -233,16 +220,16 @@ void Pipeline::init_dynamic_rendering_bda(
         .pDynamicStates = dynamic_states,
     };
 
-    VkFormat color_fmt = color_format;
-    VkFormat depth_fmt = depth_format;
+    VkFormat color_fmt = config.color_format;
+    VkFormat depth_fmt = config.depth_format;
     VkPipelineRenderingCreateInfo pipeline_rendering_info{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
         .pNext = nullptr,
         .viewMask = 0,
-        .colorAttachmentCount = (color_format != VK_FORMAT_UNDEFINED) ? 1u : 0u,
-        .pColorAttachmentFormats = (color_format != VK_FORMAT_UNDEFINED) ? &color_fmt : nullptr,
+        .colorAttachmentCount = (config.color_format != VK_FORMAT_UNDEFINED) ? 1u : 0u,
+        .pColorAttachmentFormats = (config.color_format != VK_FORMAT_UNDEFINED) ? &color_fmt : nullptr,
         .depthAttachmentFormat = depth_fmt,
-        .stencilAttachmentFormat = VK_FORMAT_UNDEFINED,
+        .stencilAttachmentFormat = config.stencil_format,
     };
 
     VkPipelineCreateFlags2CreateInfo flags2_info{
@@ -277,19 +264,55 @@ void Pipeline::init_dynamic_rendering_bda(
         throw std::runtime_error("Failed to create graphics pipeline with VK_EXT_descriptor_heap");
     }
 
-    if (debug_name) {
-        vk.set_name(m_pipeline, debug_name);
+    if (config.debug_name) {
+        vk.set_name(m_pipeline, config.debug_name);
     }
 
     m_vkd.vkDestroyShaderModule(m_device, fs_module, nullptr);
     m_vkd.vkDestroyShaderModule(m_device, vs_module, nullptr);
 }
 
+void Pipeline::init_dynamic_rendering_bda(
+    VulkanDevice& vk,
+    const CompiledShaders& shaders,
+    VkFormat color_format,
+    VkFormat depth_format,
+    const std::vector<DescriptorBindingMapping>& mappings,
+    VkCullModeFlags cull_mode,
+    VkFrontFace front_face,
+    const char* debug_name) {
+    GraphicsPipelineConfig config{
+        .color_format = color_format,
+        .depth_format = depth_format,
+        .stencil_format = VK_FORMAT_UNDEFINED,
+        .mappings = mappings,
+        .cull_mode = cull_mode,
+        .front_face = front_face,
+        .polygon_mode = VK_POLYGON_MODE_FILL,
+        .line_width = 1.0f,
+        .depth_test_enable = (depth_format != VK_FORMAT_UNDEFINED),
+        .depth_write_enable = (depth_format != VK_FORMAT_UNDEFINED),
+        .depth_compare_op = VK_COMPARE_OP_LESS,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .blend_attachment = {
+            .blendEnable = VK_FALSE,
+            .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
+            .dstColorBlendFactor = VK_BLEND_FACTOR_ZERO,
+            .colorBlendOp = VK_BLEND_OP_ADD,
+            .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+            .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+            .alphaBlendOp = VK_BLEND_OP_ADD,
+            .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+        },
+        .debug_name = debug_name,
+    };
+    init_dynamic_rendering_bda(vk, shaders, config);
+}
+
 void Pipeline::init_compute(
     VulkanDevice& vk,
     const CompiledShaders& shaders,
-    const std::vector<DescriptorBindingMapping>& mappings,
-    const char* debug_name) {
+    const ComputePipelineConfig& config) {
     cleanup();
     m_device = vk.get_device();
     m_vkd = vk.vkd();
@@ -297,7 +320,7 @@ void Pipeline::init_compute(
     VkShaderModule cs_module = create_shader_module(m_vkd, m_device, shaders.cs_spirv);
 
     std::vector<VkDescriptorSetAndBindingMappingEXT> vk_mappings;
-    for (const auto& m : mappings) {
+    for (const auto& m : config.mappings) {
         vk_mappings.push_back({
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_AND_BINDING_MAPPING_EXT,
             .pNext = nullptr,
@@ -347,11 +370,23 @@ void Pipeline::init_compute(
         throw std::runtime_error("Failed to create compute pipeline with VK_EXT_descriptor_heap");
     }
 
-    if (debug_name) {
-        vk.set_name(m_pipeline, debug_name);
+    if (config.debug_name) {
+        vk.set_name(m_pipeline, config.debug_name);
     }
 
     m_vkd.vkDestroyShaderModule(m_device, cs_module, nullptr);
+}
+
+void Pipeline::init_compute(
+    VulkanDevice& vk,
+    const CompiledShaders& shaders,
+    const std::vector<DescriptorBindingMapping>& mappings,
+    const char* debug_name) {
+    ComputePipelineConfig config{
+        .mappings = mappings,
+        .debug_name = debug_name,
+    };
+    init_compute(vk, shaders, config);
 }
 
 void Pipeline::cleanup() {

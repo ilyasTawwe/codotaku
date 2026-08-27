@@ -12,6 +12,7 @@
 
 #include <codotaku/vulkan/instance.hpp>
 #include <codotaku/vulkan/descriptor_heap.hpp>
+#include <codotaku/vulkan/pipeline.hpp>
 
 namespace codotaku {
 
@@ -39,9 +40,22 @@ enum class QueueType {
     VideoEncode
 };
 
+struct DeviceConfig {
+    GpuSelector gpu_selector{GpuPreference::DiscreteFirst};
+    VkPhysicalDevice preferred_gpu{VK_NULL_HANDLE};
+    std::vector<const char*> extra_extensions{};
+    void* custom_features_pnext{nullptr};
+    VkDeviceSize resource_heap_size{4 * 1024 * 1024};
+    VkDeviceSize sampler_heap_size{64 * 1024};
+    bool enable_video_decode{true};
+    bool enable_video_encode{true};
+    float default_queue_priority{1.0f};
+};
+
 class VulkanDevice {
 public:
-    VulkanDevice(VulkanInstance& instance, VkPhysicalDevice preferred_gpu = VK_NULL_HANDLE);
+    explicit VulkanDevice(VulkanInstance& instance, const DeviceConfig& config = {});
+    explicit VulkanDevice(VulkanInstance& instance, VkPhysicalDevice preferred_gpu);
     ~VulkanDevice();
 
     VulkanDevice(const VulkanDevice&) = delete;
@@ -51,6 +65,29 @@ public:
     VulkanDevice& operator=(VulkanDevice&& other) noexcept;
 
     void cleanup();
+
+    // Pipeline Factory Helpers directly on Device
+    Pipeline create_pipeline(
+        const CompiledShaders& shaders,
+        const GraphicsPipelineConfig& config);
+
+    Pipeline create_pipeline(
+        const CompiledShaders& shaders,
+        VkFormat color_format,
+        VkFormat depth_format,
+        const std::vector<DescriptorBindingMapping>& mappings = {},
+        VkCullModeFlags cull_mode = VK_CULL_MODE_BACK_BIT,
+        VkFrontFace front_face = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+        const char* debug_name = "Graphics Dynamic Rendering Pipeline");
+
+    Pipeline create_compute_pipeline(
+        const CompiledShaders& shaders,
+        const ComputePipelineConfig& config);
+
+    Pipeline create_compute_pipeline(
+        const CompiledShaders& shaders,
+        const std::vector<DescriptorBindingMapping>& mappings = {},
+        const char* debug_name = "Compute Pipeline");
 
     // Getters
     VkPhysicalDevice get_physical_device() const { return m_physical_device; }
@@ -115,11 +152,12 @@ public:
     void set_name(VkShaderModule mod, const char* name) const { set_debug_name(VK_OBJECT_TYPE_SHADER_MODULE, (uint64_t)mod, name); }
 
 private:
-    void select_physical_device(VulkanInstance& instance, VkPhysicalDevice preferred_gpu);
+    void select_physical_device(VulkanInstance& instance, const DeviceConfig& config);
     void setup_drm_and_gbm();
-    void create_logical_device(VulkanInstance& instance);
-    void init_vma(VulkanInstance& instance);
+    void create_logical_device(VulkanInstance& instance, const DeviceConfig& config);
+    void init_vma(VulkanInstance& instance, const DeviceConfig& config);
 
+    DeviceConfig m_config{};
     VkPhysicalDevice m_physical_device{VK_NULL_HANDLE};
     VkDevice m_device{VK_NULL_HANDLE};
     VolkDeviceTable m_vkd{};

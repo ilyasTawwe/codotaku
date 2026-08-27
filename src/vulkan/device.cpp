@@ -24,16 +24,83 @@
 
 namespace codotaku {
 
-VulkanDevice::VulkanDevice(VulkanInstance& instance, VkPhysicalDevice preferred_gpu) {
-    select_physical_device(instance, preferred_gpu);
+VulkanDevice::VulkanDevice(VulkanInstance& instance, const DeviceConfig& config)
+    : m_config(config) {
+    select_physical_device(instance, m_config);
     setup_drm_and_gbm();
-    create_logical_device(instance);
-    init_vma(instance);
-    m_descriptor_heap.init(*this);
+    create_logical_device(instance, m_config);
+    init_vma(instance, m_config);
+    m_descriptor_heap.init(*this, m_config.resource_heap_size, m_config.sampler_heap_size);
 }
+
+VulkanDevice::VulkanDevice(VulkanInstance& instance, VkPhysicalDevice preferred_gpu)
+    : VulkanDevice(instance, DeviceConfig{ .preferred_gpu = preferred_gpu }) {}
 
 VulkanDevice::~VulkanDevice() {
     cleanup();
+}
+
+Pipeline VulkanDevice::create_pipeline(
+    const CompiledShaders& shaders,
+    const GraphicsPipelineConfig& config) {
+    Pipeline p;
+    p.init_dynamic_rendering_bda(*this, shaders, config);
+    return p;
+}
+
+Pipeline VulkanDevice::create_pipeline(
+    const CompiledShaders& shaders,
+    VkFormat color_format,
+    VkFormat depth_format,
+    const std::vector<DescriptorBindingMapping>& mappings,
+    VkCullModeFlags cull_mode,
+    VkFrontFace front_face,
+    const char* debug_name) {
+    GraphicsPipelineConfig config{
+        .color_format = color_format,
+        .depth_format = depth_format,
+        .stencil_format = VK_FORMAT_UNDEFINED,
+        .mappings = mappings,
+        .cull_mode = cull_mode,
+        .front_face = front_face,
+        .polygon_mode = VK_POLYGON_MODE_FILL,
+        .line_width = 1.0f,
+        .depth_test_enable = (depth_format != VK_FORMAT_UNDEFINED),
+        .depth_write_enable = (depth_format != VK_FORMAT_UNDEFINED),
+        .depth_compare_op = VK_COMPARE_OP_LESS,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .blend_attachment = {
+            .blendEnable = VK_FALSE,
+            .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
+            .dstColorBlendFactor = VK_BLEND_FACTOR_ZERO,
+            .colorBlendOp = VK_BLEND_OP_ADD,
+            .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+            .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+            .alphaBlendOp = VK_BLEND_OP_ADD,
+            .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+        },
+        .debug_name = debug_name,
+    };
+    return create_pipeline(shaders, config);
+}
+
+Pipeline VulkanDevice::create_compute_pipeline(
+    const CompiledShaders& shaders,
+    const ComputePipelineConfig& config) {
+    Pipeline p;
+    p.init_compute(*this, shaders, config);
+    return p;
+}
+
+Pipeline VulkanDevice::create_compute_pipeline(
+    const CompiledShaders& shaders,
+    const std::vector<DescriptorBindingMapping>& mappings,
+    const char* debug_name) {
+    ComputePipelineConfig config{
+        .mappings = mappings,
+        .debug_name = debug_name,
+    };
+    return create_compute_pipeline(shaders, config);
 }
 
 VulkanDevice::VulkanDevice(VulkanDevice&& other) noexcept
@@ -89,51 +156,15 @@ VulkanDevice& VulkanDevice::operator=(VulkanDevice&& other) noexcept {
     return *this;
 }
 
-void VulkanDevice::select_physical_device(VulkanInstance& instance, VkPhysicalDevice preferred_gpu) {
-    auto devices = instance.enumerate_physical_devices();
-    if (devices.empty()) {
-        throw std::runtime_error("No Vulkan capable GPU found");
-    }
-
-    if (preferred_gpu != VK_NULL_HANDLE) {
-        m_physical_device = preferred_gpu;
+void VulkanDevice::select_physical_device(VulkanInstance& instance, const DeviceConfig& config) {
+    if (config.preferred_gpu != VK_NULL_HANDLE) {
+        m_physical_device = config.preferred_gpu;
     } else {
-        // Choose discrete GPU with graphics support first
-        VkPhysicalDevice fallback_gpu = VK_NULL_HANDLE;
-        for (auto pdev : devices) {
-            VkPhysicalDeviceProperties props;
-            instance.vki().vkGetPhysicalDeviceProperties(pdev, &props);
-
-            uint32_t qf_count = 0;
-            instance.vki().vkGetPhysicalDeviceQueueFamilyProperties(pdev, &qf_count, nullptr);
-            std::vector<VkQueueFamilyProperties> qf_props(qf_count);
-            instance.vki().vkGetPhysicalDeviceQueueFamilyProperties(pdev, &qf_count, qf_props.data());
-
-            bool has_graphics = false;
-            for (const auto& qf : qf_props) {
-                if (qf.queueFlags & VK_QUEUE_GRAPHICS_BIT) {
-                    has_graphics = true;
-                    break;
-                }
-            }
-
-            if (has_graphics) {
-                if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
-                    m_physical_device = pdev;
-                    break;
-                }
-                if (fallback_gpu == VK_NULL_HANDLE) {
-                    fallback_gpu = pdev;
-                }
-            }
-        }
-        if (m_physical_device == VK_NULL_HANDLE) {
-            m_physical_device = fallback_gpu;
-        }
+        m_physical_device = instance.select_physical_device(config.gpu_selector);
     }
 
     if (m_physical_device == VK_NULL_HANDLE) {
-        throw std::runtime_error("Failed to find a suitable GPU with Graphics support");
+        throw std::runtime_error("Failed to select physical GPU device matching criteria");
     }
 
     instance.vki().vkGetPhysicalDeviceMemoryProperties(m_physical_device, &m_memory_properties);
@@ -141,6 +172,7 @@ void VulkanDevice::select_physical_device(VulkanInstance& instance, VkPhysicalDe
     // Query Physical Device Properties, DRM properties, Descriptor Heap Properties & Alignment Limits
     m_drm_properties = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRM_PROPERTIES_EXT,
+        .pNext = nullptr,
     };
     m_descriptor_heap_properties = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_HEAP_PROPERTIES_EXT,
@@ -204,7 +236,7 @@ void VulkanDevice::setup_drm_and_gbm() {
     }
 }
 
-void VulkanDevice::create_logical_device(VulkanInstance& instance) {
+void VulkanDevice::create_logical_device(VulkanInstance& instance, const DeviceConfig& config) {
     uint32_t queue_family_count = 0;
     instance.vki().vkGetPhysicalDeviceQueueFamilyProperties(m_physical_device, &queue_family_count, nullptr);
     std::vector<VkQueueFamilyProperties> queue_families(queue_family_count);
@@ -245,29 +277,35 @@ void VulkanDevice::create_logical_device(VulkanInstance& instance) {
     if (compute_family == -1) compute_family = graphics_family;
 
     // 4. Find Video Decode & Encode Families
-    for (uint32_t i = 0; i < queue_family_count; ++i) {
-        if (queue_families[i].queueFlags & VK_QUEUE_VIDEO_DECODE_BIT_KHR) {
-            video_decode_family = static_cast<int>(i);
+    if (config.enable_video_decode) {
+        for (uint32_t i = 0; i < queue_family_count; ++i) {
+            if (queue_families[i].queueFlags & VK_QUEUE_VIDEO_DECODE_BIT_KHR) {
+                video_decode_family = static_cast<int>(i);
+            }
         }
-        if (queue_families[i].queueFlags & VK_QUEUE_VIDEO_ENCODE_BIT_KHR) {
-            video_encode_family = static_cast<int>(i);
+    }
+    if (config.enable_video_encode) {
+        for (uint32_t i = 0; i < queue_family_count; ++i) {
+            if (queue_families[i].queueFlags & VK_QUEUE_VIDEO_ENCODE_BIT_KHR) {
+                video_encode_family = static_cast<int>(i);
+            }
         }
     }
 
     // Build unique queue create infos
     std::map<uint32_t, std::vector<float>> family_queues;
-    family_queues[static_cast<uint32_t>(graphics_family)].push_back(1.0f);
+    family_queues[static_cast<uint32_t>(graphics_family)].push_back(config.default_queue_priority);
     if (transfer_family != graphics_family) {
-        family_queues[static_cast<uint32_t>(transfer_family)].push_back(1.0f);
+        family_queues[static_cast<uint32_t>(transfer_family)].push_back(config.default_queue_priority);
     }
     if (compute_family != graphics_family && compute_family != transfer_family) {
-        family_queues[static_cast<uint32_t>(compute_family)].push_back(1.0f);
+        family_queues[static_cast<uint32_t>(compute_family)].push_back(config.default_queue_priority);
     }
     if (video_decode_family != -1 && !family_queues.contains(static_cast<uint32_t>(video_decode_family))) {
-        family_queues[static_cast<uint32_t>(video_decode_family)].push_back(1.0f);
+        family_queues[static_cast<uint32_t>(video_decode_family)].push_back(config.default_queue_priority);
     }
     if (video_encode_family != -1 && !family_queues.contains(static_cast<uint32_t>(video_encode_family))) {
-        family_queues[static_cast<uint32_t>(video_encode_family)].push_back(1.0f);
+        family_queues[static_cast<uint32_t>(video_encode_family)].push_back(config.default_queue_priority);
     }
 
     std::vector<VkDeviceQueueCreateInfo> queue_create_infos;
@@ -323,6 +361,10 @@ void VulkanDevice::create_logical_device(VulkanInstance& instance) {
         enable_dev_ext(VK_KHR_VIDEO_ENCODE_QUEUE_EXTENSION_NAME);
     }
 
+    for (const char* extra_ext : config.extra_extensions) {
+        enable_dev_ext(extra_ext);
+    }
+
     VkPhysicalDeviceFeatures features{
         .samplerAnisotropy = VK_TRUE,
         .shaderInt64 = VK_TRUE,
@@ -331,13 +373,13 @@ void VulkanDevice::create_logical_device(VulkanInstance& instance) {
 
     VkPhysicalDeviceMemoryPriorityFeaturesEXT memory_priority_features{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PRIORITY_FEATURES_EXT,
-        .pNext = nullptr,
+        .pNext = config.custom_features_pnext,
         .memoryPriority = VK_TRUE,
     };
 
     VkPhysicalDeviceDescriptorHeapFeaturesEXT descriptor_heap_features{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_HEAP_FEATURES_EXT,
-        .pNext = m_has_memory_priority ? &memory_priority_features : nullptr,
+        .pNext = m_has_memory_priority ? &memory_priority_features : config.custom_features_pnext,
         .descriptorHeap = VK_TRUE,
         .descriptorHeapCaptureReplay = VK_FALSE,
     };
@@ -436,7 +478,7 @@ void VulkanDevice::create_logical_device(VulkanInstance& instance) {
         m_graphics_queue.family_index, m_transfer_queue.family_index, m_compute_queue.family_index);
 }
 
-void VulkanDevice::init_vma(VulkanInstance& instance) {
+void VulkanDevice::init_vma(VulkanInstance& instance, const DeviceConfig&) {
     VmaVulkanFunctions vulkan_functions{};
     vulkan_functions.vkGetInstanceProcAddr = vkGetInstanceProcAddr;
     vulkan_functions.vkGetDeviceProcAddr = vkGetDeviceProcAddr;
