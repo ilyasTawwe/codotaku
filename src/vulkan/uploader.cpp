@@ -77,6 +77,8 @@ Uploader::Uploader(Uploader&& other) noexcept
       m_fence(std::exchange(other.m_fence, VK_NULL_HANDLE)),
       m_staging_buffer(std::exchange(other.m_staging_buffer, VK_NULL_HANDLE)),
       m_staging_allocation(std::exchange(other.m_staging_allocation, VK_NULL_HANDLE)),
+      m_staging_mapped_ptr(std::exchange(other.m_staging_mapped_ptr, nullptr)),
+      m_staging_capacity(std::exchange(other.m_staging_capacity, 0)),
       m_buffer_tasks(std::move(other.m_buffer_tasks)),
       m_image_tasks(std::move(other.m_image_tasks)),
       m_in_flight(std::exchange(other.m_in_flight, false)) {}
@@ -94,6 +96,8 @@ Uploader& Uploader::operator=(Uploader&& other) noexcept {
         m_fence = std::exchange(other.m_fence, VK_NULL_HANDLE);
         m_staging_buffer = std::exchange(other.m_staging_buffer, VK_NULL_HANDLE);
         m_staging_allocation = std::exchange(other.m_staging_allocation, VK_NULL_HANDLE);
+        m_staging_mapped_ptr = std::exchange(other.m_staging_mapped_ptr, nullptr);
+        m_staging_capacity = std::exchange(other.m_staging_capacity, 0);
         m_buffer_tasks = std::move(other.m_buffer_tasks);
         m_image_tasks = std::move(other.m_image_tasks);
         m_in_flight = std::exchange(other.m_in_flight, false);
@@ -179,7 +183,7 @@ Texture Uploader::upload_texture(
         .arrayLayers = 1,
         .samples = VK_SAMPLE_COUNT_1_BIT,
         .tiling = VK_IMAGE_TILING_OPTIMAL,
-        .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        .usage = final_desc.usage | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
     };
@@ -263,43 +267,50 @@ void Uploader::upload() {
     if (m_in_flight) {
         wait();
     }
-    free_staging_resources();
 
     // 1. Calculate required staging buffer size taking alignments into account
-    VkDeviceSize current_offset = 0;
+    VkDeviceSize required_size = 0;
     for (auto& task : m_buffer_tasks) {
-        current_offset = align_up(current_offset, 16);
-        task.staging_offset = current_offset;
-        current_offset += task.size;
+        required_size = align_up(required_size, 16);
+        task.staging_offset = required_size;
+        required_size += task.size;
     }
 
     for (auto& task : m_image_tasks) {
-        current_offset = align_up(current_offset, 16);
-        task.staging_offset = current_offset;
-        current_offset += task.size;
+        required_size = align_up(required_size, 16);
+        task.staging_offset = required_size;
+        required_size += task.size;
     }
 
-    if (current_offset == 0) return;
+    if (required_size == 0) return;
 
-    // 2. Allocate 1 single host-mapped staging buffer for the entire batch
-    VkBufferCreateInfo staging_info{
-        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .size = current_offset,
-        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-    };
+    // 2. Lazily allocate or reuse existing staging buffer
+    if (m_staging_buffer == VK_NULL_HANDLE || required_size > m_staging_capacity) {
+        free_staging_resources();
 
-    VmaAllocationCreateInfo staging_alloc_info{
-        .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT,
-        .usage = VMA_MEMORY_USAGE_AUTO,
-    };
+        VkBufferCreateInfo staging_info{
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .size = required_size,
+            .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        };
 
-    VmaAllocationInfo mapped_info{};
-    if (vmaCreateBuffer(m_allocator, &staging_info, &staging_alloc_info, &m_staging_buffer, &m_staging_allocation, &mapped_info) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to allocate staging buffer in Uploader");
+        VmaAllocationCreateInfo staging_alloc_info{
+            .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT,
+            .usage = VMA_MEMORY_USAGE_AUTO,
+        };
+
+        VmaAllocationInfo mapped_info{};
+        if (vmaCreateBuffer(m_allocator, &staging_info, &staging_alloc_info, &m_staging_buffer, &m_staging_allocation, &mapped_info) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to allocate staging buffer in Uploader");
+        }
+
+        m_staging_capacity = required_size;
+        m_staging_mapped_ptr = mapped_info.pMappedData;
+        std::println("[Codotaku Uploader] Lazily allocated/recreated staging buffer (Capacity: {} KB)", m_staging_capacity / 1024);
     }
 
-    uint8_t* mapped_ptr = static_cast<uint8_t*>(mapped_info.pMappedData);
+    uint8_t* mapped_ptr = static_cast<uint8_t*>(m_staging_mapped_ptr);
 
     // 3. Copy all data into staging memory
     for (const auto& task : m_buffer_tasks) {
@@ -418,14 +429,13 @@ void Uploader::upload() {
     m_buffer_tasks.clear();
     m_image_tasks.clear();
 
-    std::println("[Codotaku Uploader] Submitted batch upload (staging size: {} KB) - executing in background.",
-        current_offset / 1024);
+    std::println("[Codotaku Uploader] Submitted batch upload (batch size: {} KB) - executing in background.",
+        required_size / 1024);
 }
 
 void Uploader::wait(uint64_t timeout_ns) {
     if (!m_in_flight) return;
     vkWaitForFences(m_device, 1, &m_fence, VK_TRUE, timeout_ns);
-    free_staging_resources();
     m_in_flight = false;
 }
 
@@ -439,6 +449,8 @@ void Uploader::free_staging_resources() {
         vmaDestroyBuffer(m_allocator, m_staging_buffer, m_staging_allocation);
         m_staging_buffer = VK_NULL_HANDLE;
         m_staging_allocation = VK_NULL_HANDLE;
+        m_staging_mapped_ptr = nullptr;
+        m_staging_capacity = 0;
     }
 }
 

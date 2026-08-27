@@ -89,7 +89,7 @@ public:
         const TextureDesc& desc = {});
 
     // 3. Batch submit all staging copies to GPU and signal fence
-    // Automatically resets the task queue for subsequent batches
+    // Reuses existing staging buffer if capacity suffices, or lazily grows it
     void upload();
 
     // 4. Synchronization
@@ -127,6 +127,8 @@ private:
 
     VkBuffer m_staging_buffer{VK_NULL_HANDLE};
     VmaAllocation m_staging_allocation{VK_NULL_HANDLE};
+    void* m_staging_mapped_ptr{nullptr};
+    VkDeviceSize m_staging_capacity{0};
 
     std::vector<BufferUploadTask> m_buffer_tasks;
     std::vector<ImageUploadTask> m_image_tasks;
