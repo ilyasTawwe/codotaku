@@ -31,6 +31,7 @@ enum class WindowClosePolicy {
 };
 
 class Window;
+class VulkanDevice;
 using WindowCloseCallback = std::function<bool(Window& window)>;
 
 struct ColorFormat {

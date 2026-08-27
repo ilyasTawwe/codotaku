@@ -343,19 +343,118 @@ int main() {
         std::println("[Main] Successfully generated textures on the fly using VK_EXT_descriptor_heap compute pipeline!");
 
         // ---------------------------------------------------------------------
-        // GRAPHICS PIPELINE & WINDOW CREATION
+        // CREATE SEPARATE LOGICAL DEVICE (DEV2) FOR WINDOW 2
+        // ---------------------------------------------------------------------
+        auto dev2 = app.create_device();
+
+        // DEV2 Descriptor Heap & Geometry Staging Uploader
+        codotaku::DescriptorHeap dev2_heap;
+        dev2_heap.init(*dev2);
+
+        codotaku::Uploader dev2_uploader(*dev2);
+
+        codotaku::GpuBufferArena dev2_geometry_arena;
+        dev2_geometry_arena.init(
+            *dev2,
+            4 * 1024 * 1024,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
+            VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
+            "Dev2 Geometry Arena");
+
+        auto dev2_vb_sub = dev2_uploader.upload_to_arena(dev2_geometry_arena, std::span(CUBE_VERTICES));
+        auto dev2_ib_sub = dev2_uploader.upload_to_arena(dev2_geometry_arena, std::span(CUBE_INDICES));
+        auto dev2_cmd_sub = dev2_uploader.upload_to_arena(dev2_geometry_arena, indirect_cmd);
+        dev2_uploader.upload();
+
+        auto dev2_grid_tex = codotaku::Texture::create_uninitialized(*dev2, 256, 256, tex_desc);
+        dev2_grid_tex.write_to_descriptor_heap(dev2_heap);
+
+        // DEV2 Compute Texture Generation Pipeline
+        auto dev2_compute_pipeline = codotaku::Pipeline{};
+        dev2_compute_pipeline.init_compute(
+            *dev2,
+            app.get_slang().compile_source(COMPUTE_TEXTURE_GEN_SLANG, "Dev2 Compute Pipeline"),
+            { codotaku::Pipeline::map_storage_image(0, 0, dev2_grid_tex.get_storage_heap_offset()) },
+            "Dev2 Compute Pipeline");
+
+        dev2->execute_single_time_commands([&](VkCommandBuffer cmd) {
+            VkImageSubresourceRange range{
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            };
+
+            VkImageMemoryBarrier2 pre_barrier{
+                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                .pNext = nullptr,
+                .srcStageMask = VK_PIPELINE_STAGE_2_NONE,
+                .srcAccessMask = VK_ACCESS_2_NONE,
+                .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image = dev2_grid_tex.get_image(),
+                .subresourceRange = range,
+            };
+
+            VkDependencyInfo pre_dep{
+                .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                .imageMemoryBarrierCount = 1,
+                .pImageMemoryBarriers = &pre_barrier,
+            };
+            dev2->vkd().vkCmdPipelineBarrier2(cmd, &pre_dep);
+
+            dev2_heap.bind(cmd);
+
+            dev2->vkd().vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, dev2_compute_pipeline.get_pipeline());
+            struct { uint32_t width, height, pattern_type; float time; } pc = { 256, 256, 1, 0.0f };
+            dev2_heap.push_data(cmd, pc);
+            dev2->vkd().vkCmdDispatch(cmd, 256 / 16, 256 / 16, 1);
+
+            VkMemoryBarrier2 post_barrier{
+                .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+                .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                .srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+            };
+            VkDependencyInfo post_dep{
+                .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                .memoryBarrierCount = 1,
+                .pMemoryBarriers = &post_barrier,
+            };
+            dev2->vkd().vkCmdPipelineBarrier2(cmd, &post_dep);
+        });
+
+        dev2_compute_pipeline.cleanup();
+
+        // DEV2 Graphics Pipeline
+        auto dev2_graphics_pipeline = codotaku::Pipeline{};
+        dev2_graphics_pipeline.init_dynamic_rendering_bda(
+            *dev2,
+            app.get_slang().compile_source(GRAPHICS_SHADER_SLANG, "Dev2 Graphics Pipeline"),
+            VK_FORMAT_B8G8R8A8_UNORM,
+            VK_FORMAT_D32_SFLOAT,
+            { codotaku::Pipeline::map_sampled_texture(0, 0, dev2_grid_tex.get_sampled_heap_offset(), dev2_grid_tex.get_sampler_heap_offset()) },
+            VK_CULL_MODE_BACK_BIT,
+            VK_FRONT_FACE_COUNTER_CLOCKWISE,
+            "Dev2 Graphics Pipeline");
+
+        // ---------------------------------------------------------------------
+        // GRAPHICS PIPELINES FOR PRIMARY DEVICE (DEV1)
         // ---------------------------------------------------------------------
         auto graphics_pipeline_checker = app.create_pipeline(
             GRAPHICS_SHADER_SLANG,
             VK_FORMAT_B8G8R8A8_UNORM,
             VK_FORMAT_D32_SFLOAT,
-            { codotaku::Pipeline::map_sampled_texture(0, 0, checkerboard_tex.get_sampled_heap_offset(), checkerboard_tex.get_sampler_heap_offset()) });
-
-        auto graphics_pipeline_grid = app.create_pipeline(
-            GRAPHICS_SHADER_SLANG,
-            VK_FORMAT_B8G8R8A8_UNORM,
-            VK_FORMAT_D32_SFLOAT,
-            { codotaku::Pipeline::map_sampled_texture(0, 0, grid_tex.get_sampled_heap_offset(), grid_tex.get_sampler_heap_offset()) });
+            { codotaku::Pipeline::map_sampled_texture(0, 0, checkerboard_tex.get_sampled_heap_offset(), checkerboard_tex.get_sampler_heap_offset()) },
+            VK_CULL_MODE_BACK_BIT,
+            VK_FRONT_FACE_COUNTER_CLOCKWISE,
+            "Dev1 Checker Graphics Pipeline");
 
         codotaku::Camera camera({0.0f, 1.4f, 3.2f}, {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, 45.0f);
 
@@ -367,8 +466,9 @@ int main() {
 
         app.set_close_policy(codotaku::WindowClosePolicy::QuitOnLastWindowClose);
 
+        // Window 1 -> Bound to Primary Device (dev1)
         app.create_window({
-            .title = "Window 1 (Primary, Compute Checkerboard)",
+            .title = "Window 1 (Primary Dev1, Checkerboard)",
             .width = 800,
             .height = 600,
             .buffer_count = 3,
@@ -377,8 +477,9 @@ int main() {
             .is_primary = true,
         });
 
+        // Window 2 -> Bound to SEPARATE Logical Device (dev2)!
         app.create_window({
-            .title = "Window 2 (Immediate, Compute Grid Pattern)",
+            .title = "Window 2 (Separate Logical Device Dev2, Grid Pattern)",
             .width = 600,
             .height = 600,
             .buffer_count = 2,
@@ -391,10 +492,11 @@ int main() {
                     .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                 }
             }
-        });
+        }, *dev2);
 
+        // Window 3 -> Bound to Primary Device (dev1)
         app.create_window({
-            .title = "Window 3 (Compute Checkerboard, Custom Close Hook)",
+            .title = "Window 3 (Primary Dev1, Custom Close Hook)",
             .width = 500,
             .height = 500,
             .buffer_count = 3,
@@ -406,15 +508,18 @@ int main() {
             },
         });
 
-        // Wait on geometry upload fence right before starting render loop
+        // Wait on geometry upload fences right before starting render loop
         uploader.wait();
+        dev2_uploader.wait();
 
         auto start_time = std::chrono::steady_clock::now();
 
-        // Transparent Render Loop (Unified GENERAL layout - zero per-frame layout transitions!)
+        // Transparent Multi-Device Multi-Window Render Loop!
         int ret = app.run([&](codotaku::Window& window, codotaku::FrameContext& frame) {
             auto now = std::chrono::steady_clock::now();
             float time_sec = std::chrono::duration<float>(now - start_time).count();
+
+            bool is_dev2 = (&frame.device == dev2.get());
 
             // Set camera aspect ratio matching the active window
             camera.set_aspect_ratio(frame.aspect_ratio);
@@ -439,46 +544,44 @@ int main() {
             scene->light_dir = glm::vec3(0.5f, 0.8f, 0.7f);
             scene->ambient_intensity = 0.35f;
             scene->light_color = glm::vec3(1.0f, 1.0f, 1.0f);
-            scene->tint = (window.get_title().find("Grid") != std::string::npos)
+            scene->tint = is_dev2
                               ? glm::vec3(1.0f, 0.8f, 0.4f)
                               : glm::vec3(1.0f, 1.0f, 1.0f);
-            scene->vertexBufferAddress = vb_sub.device_address;
-            scene->indexBufferAddress = ib_sub.device_address;
-            scene->indirectCommandsAddress = cmd_sub.device_address;
+            scene->vertexBufferAddress = is_dev2 ? dev2_vb_sub.device_address : vb_sub.device_address;
+            scene->indexBufferAddress = is_dev2 ? dev2_ib_sub.device_address : ib_sub.device_address;
+            scene->indirectCommandsAddress = is_dev2 ? dev2_cmd_sub.device_address : cmd_sub.device_address;
 
             // Direct Vulkan Dynamic Rendering pass (operating uniformly in GENERAL layout)
             frame.begin_rendering_with_attachment({.float32 = {0.05f, 0.05f, 0.08f, 1.0f}}, 0, 1.0f);
             frame.set_viewport_and_scissor();
 
-            // Bind global descriptor heaps
-            app.get_descriptor_heap().bind(frame.cmd);
-
-            bool is_grid = (window.get_title().find("Grid") != std::string::npos);
-            frame.vkd.vkCmdBindPipeline(
-                frame.cmd,
-                VK_PIPELINE_BIND_POINT_GRAPHICS,
-                is_grid ? graphics_pipeline_grid.get_pipeline() : graphics_pipeline_checker.get_pipeline());
-
-            // Push 8-byte Root Scene BDA address via VK_EXT_descriptor_heap Push Data!
             uint64_t scene_addr = scene_suballoc.device_address;
-            app.get_descriptor_heap().push_data(frame.cmd, scene_addr);
 
-            // GPU-Driven Indirect Draw!
-            frame.vkd.vkCmdDrawIndirect(
-                frame.cmd,
-                geometry_arena.get_buffer(),
-                cmd_sub.offset,
-                1,
-                sizeof(VkDrawIndirectCommand));
+            if (is_dev2) {
+                // Window 2 -> Renders with separate logical device DEV2!
+                dev2_heap.bind(frame.cmd);
+                frame.vkd.vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, dev2_graphics_pipeline.get_pipeline());
+                dev2_heap.push_data(frame.cmd, scene_addr);
+                frame.vkd.vkCmdDrawIndirect(frame.cmd, dev2_geometry_arena.get_buffer(), dev2_cmd_sub.offset, 1, sizeof(VkDrawIndirectCommand));
+            } else {
+                // Windows 1 & 3 -> Render with primary logical device DEV1!
+                app.get_descriptor_heap().bind(frame.cmd);
+                frame.vkd.vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, graphics_pipeline_checker.get_pipeline());
+                app.get_descriptor_heap().push_data(frame.cmd, scene_addr);
+                frame.vkd.vkCmdDrawIndirect(frame.cmd, geometry_arena.get_buffer(), cmd_sub.offset, 1, sizeof(VkDrawIndirectCommand));
+            }
 
             frame.end_rendering();
         });
 
         checkerboard_tex.cleanup();
         grid_tex.cleanup();
+        dev2_grid_tex.cleanup();
+        dev2_heap.cleanup();
         geometry_arena.cleanup(vk.get_allocator());
+        dev2_geometry_arena.cleanup(dev2->get_allocator());
         graphics_pipeline_checker.cleanup();
-        graphics_pipeline_grid.cleanup();
+        dev2_graphics_pipeline.cleanup();
         return ret;
 
     } catch (const std::exception& e) {

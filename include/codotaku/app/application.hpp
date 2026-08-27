@@ -33,7 +33,12 @@ public:
     Application(const Application&) = delete;
     Application& operator=(const Application&) = delete;
 
+    std::unique_ptr<VulkanDevice> create_device(VkPhysicalDevice preferred_gpu = VK_NULL_HANDLE) {
+        return std::make_unique<VulkanDevice>(m_vulkan_instance, preferred_gpu);
+    }
+
     Window* create_window(WindowConfig config);
+    Window* create_window(WindowConfig config, VulkanDevice& device);
 
     Pipeline create_pipeline(
         const char* slang_code,

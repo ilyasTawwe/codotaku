@@ -41,6 +41,7 @@ struct FrameContext {
     size_t buffer_index{0};
     GpuBufferArena& frame_arena;
     GBuffer& gbuffer;
+    VulkanDevice& device;
     const VolkDeviceTable& vkd;
 
     void begin_rendering(VkClearColorValue clear_color, VkImageView depth_view = VK_NULL_HANDLE, float clear_depth = 1.0f) const;
@@ -57,7 +58,7 @@ public:
     Window(const Window&) = delete;
     Window& operator=(const Window&) = delete;
 
-    void cleanup(VulkanDevice& vk);
+    void cleanup();
 
     bool is_open() const { return m_open; }
     bool is_configured() const { return m_configured; }
@@ -72,6 +73,9 @@ public:
     void set_primary(bool primary) { m_config.is_primary = primary; }
     void set_close_callback(WindowCloseCallback callback) { m_config.on_close = std::move(callback); }
 
+    VulkanDevice& get_device() { return m_vk; }
+    const VulkanDevice& get_device() const { return m_vk; }
+
     GBuffer& get_gbuffer() { return m_gbuffer; }
     const GBuffer& get_gbuffer() const { return m_gbuffer; }
 
@@ -80,20 +84,21 @@ public:
     void handle_surface_configure();
     void handle_close();
 
-    std::optional<FrameContext> begin_frame(VulkanDevice& vk);
-    void submit_and_present(VulkanDevice& vk, const FrameContext& frame);
+    std::optional<FrameContext> begin_frame();
+    void submit_and_present(const FrameContext& frame);
 
 private:
     void init_wayland_surface(WaylandContext& wl);
-    void init_drm_syncobj_timelines(WaylandContext& wl, VulkanDevice& vk);
+    void init_drm_syncobj_timelines(WaylandContext& wl);
     void choose_color_format(WaylandContext& wl);
-    void create_dmabuf_buffers(WaylandContext& wl, VulkanDevice& vk);
-    void cleanup_dmabuf_buffers(VulkanDevice& vk);
-    void init_frame_arena(VulkanDevice& vk);
-    void recreate_buffers(VulkanDevice& vk);
-    void create_command_resources(VulkanDevice& vk);
+    void create_dmabuf_buffers(WaylandContext& wl);
+    void cleanup_dmabuf_buffers();
+    void init_frame_arena();
+    void recreate_buffers();
+    void create_command_resources();
 
     WaylandContext* m_wayland_ctx{nullptr};
+    VulkanDevice& m_vk;
     WindowConfig m_config;
     uint32_t m_width{800};
     uint32_t m_height{600};

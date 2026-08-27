@@ -34,7 +34,7 @@ Application::Application(std::string app_name)
 Application::~Application() {
     log_info("[Codotaku] Shutting down application and cleaning resources...");
     for (auto& win : m_windows) {
-        win->cleanup(m_vulkan_device);
+        win->cleanup();
     }
     m_windows.clear();
     m_descriptor_heap.cleanup();
@@ -59,7 +59,11 @@ void Application::setup_event_loop_handlers() {
 }
 
 Window* Application::create_window(WindowConfig config) {
-    auto win = std::make_unique<Window>(m_wayland, m_vulkan_device, std::move(config));
+    return create_window(std::move(config), m_vulkan_device);
+}
+
+Window* Application::create_window(WindowConfig config, VulkanDevice& device) {
+    auto win = std::make_unique<Window>(m_wayland, device, std::move(config));
     Window* ptr = win.get();
     m_windows.push_back(std::move(win));
     return ptr;
@@ -141,7 +145,7 @@ bool Application::poll_events() {
                 log_info("[Codotaku] Primary window closed. Terminating application (Policy: QuitOnPrimaryWindowClose).");
                 should_terminate = true;
             }
-            (*it)->cleanup(m_vulkan_device);
+            (*it)->cleanup();
             it = m_windows.erase(it);
         } else {
             ++it;
@@ -150,7 +154,7 @@ bool Application::poll_events() {
 
     if (should_terminate) {
         for (auto& win : m_windows) {
-            win->cleanup(m_vulkan_device);
+            win->cleanup();
         }
         m_windows.clear();
         m_event_loop.exit(0);
@@ -170,14 +174,18 @@ int Application::run(const RenderCallback& render_callback) {
 
     while (poll_events()) {
         for (auto& win : m_windows) {
-            if (auto frame = win->begin_frame(m_vulkan_device)) {
+            if (auto frame = win->begin_frame()) {
                 render_callback(*win, *frame);
-                win->submit_and_present(m_vulkan_device, *frame);
+                win->submit_and_present(*frame);
             }
         }
     }
 
     log_info("[Codotaku] Render loop exited.");
+    for (auto& win : m_windows) {
+        win->cleanup();
+    }
+    m_windows.clear();
     return 0;
 }
 
