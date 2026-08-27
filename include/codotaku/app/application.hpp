@@ -42,6 +42,9 @@ public:
     using RenderCallback = std::function<void(Window& window, FrameContext& frame)>;
     int run(const RenderCallback& render_callback);
 
+    void set_close_policy(WindowClosePolicy policy) { m_close_policy = policy; }
+    WindowClosePolicy get_close_policy() const { return m_close_policy; }
+
     WaylandContext& get_wayland() { return m_wayland; }
     VulkanContext& get_vulkan() { return m_vulkan; }
     GpuBufferArena& get_geometry_arena() { return m_geometry_arena; }
@@ -49,6 +52,7 @@ public:
 
 private:
     std::string m_app_name;
+    WindowClosePolicy m_close_policy{WindowClosePolicy::QuitOnLastWindowClose};
     WaylandContext m_wayland;
     VulkanContext m_vulkan;
     SlangCompiler m_slang;

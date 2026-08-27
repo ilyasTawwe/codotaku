@@ -121,7 +121,7 @@ Pipeline Application::create_pipeline(
 }
 
 bool Application::poll_events() {
-    if (m_windows.empty() || g_interrupted.load()) {
+    if ((m_close_policy != WindowClosePolicy::Manual && m_windows.empty()) || g_interrupted.load()) {
         return false;
     }
 
@@ -144,9 +144,17 @@ bool Application::poll_events() {
         wl_display_cancel_read(m_wayland.get_display());
     }
 
-    // Clean up closed windows dynamically
+    // Process closed windows according to the configured WindowClosePolicy
+    bool should_terminate = false;
     for (auto it = m_windows.begin(); it != m_windows.end();) {
         if (!(*it)->is_open()) {
+            if (m_close_policy == WindowClosePolicy::QuitOnAnyWindowClose) {
+                std::println("[Codotaku] Terminating application (Policy: QuitOnAnyWindowClose).");
+                should_terminate = true;
+            } else if (m_close_policy == WindowClosePolicy::QuitOnPrimaryWindowClose && (*it)->is_primary()) {
+                std::println("[Codotaku] Primary window closed. Terminating application (Policy: QuitOnPrimaryWindowClose).");
+                should_terminate = true;
+            }
             (*it)->cleanup(m_vulkan);
             it = m_windows.erase(it);
         } else {
@@ -154,7 +162,19 @@ bool Application::poll_events() {
         }
     }
 
-    return !m_windows.empty() && !g_interrupted.load();
+    if (should_terminate) {
+        for (auto& win : m_windows) {
+            win->cleanup(m_vulkan);
+        }
+        m_windows.clear();
+        return false;
+    }
+
+    if (m_close_policy != WindowClosePolicy::Manual && m_windows.empty()) {
+        return false;
+    }
+
+    return !g_interrupted.load();
 }
 
 int Application::run(const RenderCallback& render_callback) {

@@ -71,7 +71,11 @@ public:
     }
     const std::string& get_title() const { return m_config.title; }
     const ColorFormat& get_color_format() const { return m_chosen_format; }
+    bool is_primary() const { return m_config.is_primary; }
+    void set_primary(bool primary) { m_config.is_primary = primary; }
+    void set_close_callback(WindowCloseCallback callback) { m_config.on_close = std::move(callback); }
 
+    void close();
     void handle_toplevel_configure(int32_t width, int32_t height);
     void handle_surface_configure();
     void handle_close();

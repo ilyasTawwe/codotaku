@@ -23,6 +23,16 @@ enum class PresentMode {
     Immediate   // VSync OFF / Uncapped (low latency)
 };
 
+enum class WindowClosePolicy {
+    QuitOnLastWindowClose,    // Default: application exits when the last window is closed
+    QuitOnPrimaryWindowClose, // Application exits immediately when the primary window is closed
+    QuitOnAnyWindowClose,     // Application exits immediately if any window is closed
+    Manual                    // Application runs until manually stopped; doesn't auto-quit
+};
+
+class Window;
+using WindowCloseCallback = std::function<bool(Window& window)>;
+
 struct ColorFormat {
     VkFormat vk_format{VK_FORMAT_B8G8R8A8_UNORM};
     uint32_t drm_fourcc{DRM_FORMAT_ARGB8888};
@@ -44,6 +54,8 @@ struct WindowConfig {
     size_t buffer_count{DEFAULT_BUFFER_COUNT};
     PresentMode present_mode{PresentMode::Fifo};
     FormatSelector format_selector{nullptr};
+    bool is_primary{false};
+    WindowCloseCallback on_close{nullptr};
 };
 
 } // namespace codotaku

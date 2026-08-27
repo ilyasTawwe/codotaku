@@ -43,6 +43,7 @@ Inspired by modern Linux presentation paradigms (such as NVIDIA's `egl-wayland2`
   - Configurable double/triple buffering (`buffer_count`).
   - VSync control (`PresentMode::Fifo` vs `PresentMode::Immediate`).
   - Format selection lambda (`FormatSelector`) to negotiate custom 10-bit HDR or sRGB formats.
+  - Multi-window close policies (`QuitOnLastWindowClose`, `QuitOnPrimaryWindowClose`, `QuitOnAnyWindowClose`, `Manual`) and per-window close callbacks.
 - **Runtime Slang Shader Compilation & Reflection**:
   - Compiles Slang shaders to SPIR-V 1.5 at runtime.
   - Automatically reflects push constant ranges and memory structures.

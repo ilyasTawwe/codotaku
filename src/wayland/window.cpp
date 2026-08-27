@@ -408,7 +408,7 @@ void Window::cleanup_dmabuf_buffers(VulkanContext& vk) {
             buf.view = VK_NULL_HANDLE;
         }
         if (buf.dmabuf_fd >= 0) {
-            close(buf.dmabuf_fd);
+            ::close(buf.dmabuf_fd);
             buf.dmabuf_fd = -1;
         }
         if (buf.image != VK_NULL_HANDLE) {
@@ -540,7 +540,18 @@ void Window::handle_surface_configure() {
     m_configured = true;
 }
 
+void Window::close() {
+    handle_close();
+}
+
 void Window::handle_close() {
+    if (m_config.on_close) {
+        bool allow_close = m_config.on_close(*this);
+        if (!allow_close) {
+            std::println("[Codotaku] Window '{}' close request cancelled by callback.", m_config.title);
+            return;
+        }
+    }
     m_open = false;
     std::println("[Codotaku] Window '{}' closed.", m_config.title);
 }

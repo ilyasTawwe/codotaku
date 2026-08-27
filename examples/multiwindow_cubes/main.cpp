@@ -173,9 +173,12 @@ int main() {
         gbuffer.remove_attachment(normal_id);
         std::println("[Main] After dynamic deletion, GBuffer active attachments: {}", gbuffer.get_active_count());
 
-        // 6. Spawn Windows with configurable Buffer Count, VSync mode, and Format Selector
+        // 6. Configure Application Window Close Policy
+        app.set_close_policy(codotaku::WindowClosePolicy::QuitOnLastWindowClose);
+
+        // Spawn Windows with configurable Buffer Count, VSync mode, and Close Callbacks
         app.create_window({
-            .title = "Window 1 (Triple Buffer, VSync ON, Cyan)",
+            .title = "Window 1 (Primary, Triple Buffer, VSync ON, Cyan)",
             .width = 800,
             .height = 600,
             .buffer_count = 3,
@@ -185,7 +188,8 @@ int main() {
                     if (fmt.vk_format == VK_FORMAT_B8G8R8A8_UNORM) return fmt;
                 }
                 return available.front();
-            }
+            },
+            .is_primary = true,
         });
 
         app.create_window({
@@ -202,6 +206,10 @@ int main() {
             .height = 500,
             .buffer_count = 3,
             .present_mode = codotaku::PresentMode::Fifo,
+            .on_close = [](codotaku::Window& win) {
+                std::println("[Custom Hook] Window '{}' intercepting close event.", win.get_title());
+                return true; // Return true to allow closing
+            },
         });
 
         auto start_time = std::chrono::steady_clock::now();
