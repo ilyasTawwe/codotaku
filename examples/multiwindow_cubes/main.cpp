@@ -451,15 +451,15 @@ int main() {
             scene->indexBufferAddress = ib_sub.device_address;
             scene->indirectCommandsAddress = cmd_sub.device_address;
 
-            // Transition depth attachment in the window's GBuffer (ID 0)
+            // Transition depth attachment in the window's GBuffer (ID 0) to GENERAL layout
             frame.gbuffer.transition(
                 frame.cmd,
                 0, // depth attachment ID
-                VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                VK_IMAGE_LAYOUT_GENERAL,
                 VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
                 VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
 
-            // Direct Vulkan Dynamic Rendering pass
+            // Direct Vulkan Dynamic Rendering pass (operating in unified GENERAL layout!)
             frame.begin_rendering_with_attachment({.float32 = {0.05f, 0.05f, 0.08f, 1.0f}}, 0, 1.0f);
             frame.set_viewport_and_scissor();
 

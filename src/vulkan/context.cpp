@@ -204,6 +204,7 @@ void VulkanContext::create_logical_device() {
         VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME,
         VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME,
         VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME,
+        VK_KHR_UNIFIED_IMAGE_LAYOUTS_EXTENSION_NAME,
     };
 
     VkPhysicalDeviceFeatures features{
@@ -224,9 +225,15 @@ void VulkanContext::create_logical_device() {
         .bufferDeviceAddress = VK_TRUE,
     };
 
+    VkPhysicalDeviceUnifiedImageLayoutsFeaturesKHR unified_layouts_features{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_UNIFIED_IMAGE_LAYOUTS_FEATURES_KHR,
+        .pNext = &vulkan12_features,
+        .unifiedImageLayouts = VK_TRUE,
+    };
+
     VkPhysicalDeviceVulkan13Features vulkan13_features{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
-        .pNext = &vulkan12_features,
+        .pNext = &unified_layouts_features,
         .synchronization2 = VK_TRUE,
         .dynamicRendering = VK_TRUE,
     };

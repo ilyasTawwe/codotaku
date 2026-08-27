@@ -21,8 +21,9 @@ Inspired by modern Linux presentation paradigms (such as NVIDIA's `egl-wayland2`
   - Eliminates micro-stutter, tearing, and race conditions using 64-bit DRM syncobj timeline points.
   - Transparent `sync_file` export/import bridging (`VK_KHR_external_semaphore_fd` $\to$ `drmSyncobjImportSyncFile` $\to$ `drmSyncobjTransfer`).
 - **Strictly Modern Vulkan (1.4+ Core)**:
+  - **`VK_KHR_unified_image_layouts`**: Eliminates legacy image layout transitions; operates uniformly in `VK_IMAGE_LAYOUT_GENERAL` across color, depth, storage, and sampled images.
   - **Dynamic Rendering** (`vkCmdBeginRendering` / `vkCmdEndRendering`) — zero legacy render passes or framebuffers.
-  - **Synchronization 2** (`vkCmdPipelineBarrier2`, `VkDependencyInfo`, `VkImageMemoryBarrier2`).
+  - **Synchronization 2 & Validation** (`vkCmdPipelineBarrier2`, active Synchronization Validation engine).
   - **Volk & VMA**: Volk meta-loader and Vulkan Memory Allocator integrated with Buffer Device Address support.
 - **Asynchronous Batch `Uploader` Primitive**:
   - Batches host-to-device transfers for meshes, buffers, and textures in a single staging buffer with automatic alignment calculation.

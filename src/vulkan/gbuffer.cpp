@@ -205,12 +205,11 @@ VkRenderingAttachmentInfo GBuffer::get_rendering_attachment_info(
     VkAttachmentLoadOp load_op,
     VkAttachmentStoreOp store_op) const {
     const auto& att = get(id);
-    bool depth = is_depth_format(att.format);
 
     VkRenderingAttachmentInfo info{
         .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
         .imageView = att.view,
-        .imageLayout = depth ? VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
         .loadOp = load_op,
         .storeOp = store_op,
         .clearValue = att.desc.clear_value,
