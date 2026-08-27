@@ -25,6 +25,7 @@ FetchContent_MakeAvailable(VulkanMemoryAllocator)
 
 pkg_check_modules(WAYLAND REQUIRED IMPORTED_TARGET wayland-client wayland-protocols)
 pkg_check_modules(DRM REQUIRED IMPORTED_TARGET libdrm)
+pkg_check_modules(GBM REQUIRED IMPORTED_TARGET gbm)
 pkg_check_modules(SYSTEMD REQUIRED IMPORTED_TARGET libsystemd)
 pkg_get_variable(WAYLAND_SCANNER wayland-scanner wayland_scanner)
 pkg_get_variable(WAYLAND_PROTOCOLS_DIR wayland-protocols pkgdatadir)
@@ -133,7 +134,8 @@ add_library(codotaku STATIC
     "${XDG_DECORATION_CODE}"
     src/system/event_loop.cpp
     src/system/log.cpp
-    src/vulkan/context.cpp
+    src/vulkan/instance.cpp
+    src/vulkan/device.cpp
     src/vulkan/descriptor_heap.cpp
     src/vulkan/arena.cpp
     src/vulkan/sync.cpp
@@ -153,8 +155,9 @@ target_include_directories(codotaku
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
-        $<BUILD_INTERFACE:${SLANG_INCLUDE_DIR}>
         $<INSTALL_INTERFACE:include>
+    SYSTEM PUBLIC
+        $<BUILD_INTERFACE:${SLANG_INCLUDE_DIR}>
 )
 
 target_compile_definitions(codotaku
@@ -163,7 +166,15 @@ target_compile_definitions(codotaku
 )
 
 target_compile_options(codotaku PRIVATE
-    -Wno-nullability-completeness
+    -Wall
+    -Wextra
+    -Wpedantic
+    -Wshadow
+    -Wno-missing-field-initializers
+    -Wno-unused-parameter
+    -Wno-unused-variable
+    -Wno-sign-conversion
+    $<$<COMPILE_LANGUAGE:CXX>:-Wno-non-virtual-dtor>
 )
 
 target_link_libraries(codotaku
@@ -175,6 +186,7 @@ target_link_libraries(codotaku
         "${SLANG_COMPILER_LIBRARY}"
         PkgConfig::WAYLAND
         PkgConfig::DRM
+        PkgConfig::GBM
         PkgConfig::SYSTEMD
 )
 

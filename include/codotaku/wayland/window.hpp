@@ -11,7 +11,7 @@
 
 #include <codotaku/core/types.hpp>
 #include <codotaku/vulkan/arena.hpp>
-#include <codotaku/vulkan/context.hpp>
+#include <codotaku/vulkan/device.hpp>
 #include <codotaku/vulkan/gbuffer.hpp>
 #include <codotaku/vulkan/sync.hpp>
 #include <codotaku/wayland/context.hpp>
@@ -50,13 +50,13 @@ struct FrameContext {
 
 class Window {
 public:
-    Window(WaylandContext& wl, VulkanContext& vk, WindowConfig config);
+    Window(WaylandContext& wl, VulkanDevice& vk, WindowConfig config);
     ~Window();
 
     Window(const Window&) = delete;
     Window& operator=(const Window&) = delete;
 
-    void cleanup(VulkanContext& vk);
+    void cleanup(VulkanDevice& vk);
 
     bool is_open() const { return m_open; }
     bool is_configured() const { return m_configured; }
@@ -79,18 +79,18 @@ public:
     void handle_surface_configure();
     void handle_close();
 
-    std::optional<FrameContext> begin_frame(VulkanContext& vk);
-    void submit_and_present(VulkanContext& vk, const FrameContext& frame);
+    std::optional<FrameContext> begin_frame(VulkanDevice& vk);
+    void submit_and_present(VulkanDevice& vk, const FrameContext& frame);
 
 private:
     void init_wayland_surface(WaylandContext& wl);
-    void init_drm_syncobj_timelines(WaylandContext& wl, VulkanContext& vk);
+    void init_drm_syncobj_timelines(WaylandContext& wl, VulkanDevice& vk);
     void choose_color_format(WaylandContext& wl);
-    void create_dmabuf_buffers(WaylandContext& wl, VulkanContext& vk);
-    void cleanup_dmabuf_buffers(VulkanContext& vk);
-    void init_frame_arena(VulkanContext& vk);
-    void recreate_buffers(VulkanContext& vk);
-    void create_command_resources(VulkanContext& vk);
+    void create_dmabuf_buffers(WaylandContext& wl, VulkanDevice& vk);
+    void cleanup_dmabuf_buffers(VulkanDevice& vk);
+    void init_frame_arena(VulkanDevice& vk);
+    void recreate_buffers(VulkanDevice& vk);
+    void create_command_resources(VulkanDevice& vk);
 
     WaylandContext* m_wayland_ctx{nullptr};
     WindowConfig m_config;

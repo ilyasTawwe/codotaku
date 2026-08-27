@@ -7,7 +7,7 @@
 #include <vk_mem_alloc.h>
 #include <codotaku/core/scene.hpp>
 #include <codotaku/vulkan/arena.hpp>
-#include <codotaku/vulkan/context.hpp>
+#include <codotaku/vulkan/device.hpp>
 #include <codotaku/vulkan/texture.hpp>
 
 namespace codotaku {
@@ -21,7 +21,7 @@ struct BufferAllocation {
 
 class Uploader {
 public:
-    explicit Uploader(VulkanContext& vk);
+    explicit Uploader(VulkanDevice& vk);
     ~Uploader();
 
     Uploader(const Uploader&) = delete;
@@ -35,18 +35,21 @@ public:
         const void* data,
         VkDeviceSize size,
         VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        VkDeviceSize alignment = 16);
+        VkDeviceSize alignment = 16,
+        const char* debug_name = "Uploaded Buffer");
 
     template <typename T>
     BufferAllocation upload_buffer(
         std::span<const T> data_span,
         VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        VkDeviceSize alignment = 16) {
+        VkDeviceSize alignment = 16,
+        const char* debug_name = "Uploaded Buffer") {
         return upload_buffer(
             data_span.data(),
             sizeof(T) * data_span.size(),
             usage,
-            alignment);
+            alignment,
+            debug_name);
     }
 
     // Suballocate from an existing GpuBufferArena and enqueue upload
@@ -89,7 +92,6 @@ public:
         const TextureDesc& desc = {});
 
     // 3. Batch submit all staging copies to GPU and signal fence
-    // Reuses existing staging buffer if capacity suffices, or lazily grows it
     void upload();
 
     // 4. Synchronization
@@ -111,16 +113,18 @@ private:
         VkFormat format{VK_FORMAT_UNDEFINED};
         const void* data{nullptr};
         VkDeviceSize size{0};
-        VkImageLayout target_layout{VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkImageLayout target_layout{VK_IMAGE_LAYOUT_GENERAL};
         VkDeviceSize staging_offset{0};
     };
 
     void free_staging_resources();
 
+    VulkanDevice* m_vk{nullptr};
     VkDevice m_device{VK_NULL_HANDLE};
     VkQueue m_queue{VK_NULL_HANDLE};
     VmaAllocator m_allocator{VK_NULL_HANDLE};
     DeviceAlignmentLimits m_limits{};
+    VolkDeviceTable m_table{};
 
     VkCommandPool m_command_pool{VK_NULL_HANDLE};
     VkCommandBuffer m_cmd{VK_NULL_HANDLE};

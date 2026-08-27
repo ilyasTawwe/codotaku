@@ -21,18 +21,20 @@ void signal_handler(int) {
 } // namespace
 
 Application::Application(std::string app_name)
-    : m_app_name(std::move(app_name)) {
+    : m_app_name(std::move(app_name)),
+      m_vulkan_instance(m_app_name, true),
+      m_vulkan_device(m_vulkan_instance) {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
     log_info("[Codotaku] Initializing Engine '{}' (C++26)...", m_app_name);
-    m_descriptor_heap.init(m_vulkan);
+    m_descriptor_heap.init(m_vulkan_device);
     setup_event_loop_handlers();
 }
 
 Application::~Application() {
     log_info("[Codotaku] Shutting down application and cleaning resources...");
     for (auto& win : m_windows) {
-        win->cleanup(m_vulkan);
+        win->cleanup(m_vulkan_device);
     }
     m_windows.clear();
     m_descriptor_heap.cleanup();
@@ -57,7 +59,7 @@ void Application::setup_event_loop_handlers() {
 }
 
 Window* Application::create_window(WindowConfig config) {
-    auto win = std::make_unique<Window>(m_wayland, m_vulkan, std::move(config));
+    auto win = std::make_unique<Window>(m_wayland, m_vulkan_device, std::move(config));
     Window* ptr = win.get();
     m_windows.push_back(std::move(win));
     return ptr;
@@ -69,26 +71,29 @@ Pipeline Application::create_pipeline(
     VkFormat depth_format,
     const std::vector<DescriptorBindingMapping>& mappings,
     VkCullModeFlags cull_mode,
-    VkFrontFace front_face) {
-    auto compiled_shaders = m_slang.compile_source(slang_code, "app_pipeline");
+    VkFrontFace front_face,
+    const char* debug_name) {
+    auto compiled_shaders = m_slang.compile_source(slang_code, debug_name);
     Pipeline pipeline;
     pipeline.init_dynamic_rendering_bda(
-        m_vulkan,
+        m_vulkan_device,
         compiled_shaders,
         color_format,
         depth_format,
         mappings,
         cull_mode,
-        front_face);
+        front_face,
+        debug_name);
     return pipeline;
 }
 
 Pipeline Application::create_compute_pipeline(
     const char* slang_code,
-    const std::vector<DescriptorBindingMapping>& mappings) {
-    auto compiled_shaders = m_slang.compile_source(slang_code, "compute_pipeline");
+    const std::vector<DescriptorBindingMapping>& mappings,
+    const char* debug_name) {
+    auto compiled_shaders = m_slang.compile_source(slang_code, debug_name);
     Pipeline pipeline;
-    pipeline.init_compute(m_vulkan, compiled_shaders, mappings);
+    pipeline.init_compute(m_vulkan_device, compiled_shaders, mappings, debug_name);
     return pipeline;
 }
 
@@ -136,7 +141,7 @@ bool Application::poll_events() {
                 log_info("[Codotaku] Primary window closed. Terminating application (Policy: QuitOnPrimaryWindowClose).");
                 should_terminate = true;
             }
-            (*it)->cleanup(m_vulkan);
+            (*it)->cleanup(m_vulkan_device);
             it = m_windows.erase(it);
         } else {
             ++it;
@@ -145,7 +150,7 @@ bool Application::poll_events() {
 
     if (should_terminate) {
         for (auto& win : m_windows) {
-            win->cleanup(m_vulkan);
+            win->cleanup(m_vulkan_device);
         }
         m_windows.clear();
         m_event_loop.exit(0);
@@ -162,13 +167,12 @@ bool Application::poll_events() {
 
 int Application::run(const RenderCallback& render_callback) {
     log_info("[Codotaku] Starting render loop with {} window(s)...", m_windows.size());
-    std::fflush(stdout);
 
     while (poll_events()) {
         for (auto& win : m_windows) {
-            if (auto frame = win->begin_frame(m_vulkan)) {
+            if (auto frame = win->begin_frame(m_vulkan_device)) {
                 render_callback(*win, *frame);
-                win->submit_and_present(m_vulkan, *frame);
+                win->submit_and_present(m_vulkan_device, *frame);
             }
         }
     }

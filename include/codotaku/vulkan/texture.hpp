@@ -4,11 +4,11 @@
 #include <string>
 #include <volk.h>
 #include <vk_mem_alloc.h>
-#include <codotaku/vulkan/descriptor_heap.hpp>
 
 namespace codotaku {
 
-class VulkanContext;
+class VulkanDevice;
+class DescriptorHeap;
 
 struct TextureDesc {
     std::string name{"texture"};
@@ -42,7 +42,7 @@ public:
         const TextureDesc& desc);
 
     static Texture create_uninitialized(
-        VulkanContext& vk,
+        VulkanDevice& vk,
         uint32_t width,
         uint32_t height,
         const TextureDesc& desc = {});

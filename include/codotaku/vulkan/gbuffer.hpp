@@ -10,7 +10,7 @@
 
 namespace codotaku {
 
-class VulkanContext;
+class VulkanDevice;
 
 struct Attachment {
     uint32_t id{0};
@@ -30,7 +30,7 @@ struct Attachment {
 class GBuffer {
 public:
     GBuffer() = default;
-    GBuffer(VulkanContext& vk, uint32_t default_width = 800, uint32_t default_height = 600);
+    GBuffer(VulkanDevice& vk, uint32_t default_width = 800, uint32_t default_height = 600);
     ~GBuffer();
 
     GBuffer(const GBuffer&) = delete;
@@ -39,7 +39,7 @@ public:
     GBuffer(GBuffer&& other) noexcept;
     GBuffer& operator=(GBuffer&& other) noexcept;
 
-    void init(VulkanContext& vk, uint32_t default_width = 800, uint32_t default_height = 600);
+    void init(VulkanDevice& vk, uint32_t default_width = 800, uint32_t default_height = 600);
     void cleanup();
 
     // Dynamic attachment management (returns stable integer index ID)
@@ -79,7 +79,7 @@ private:
 
     VkDevice m_device{VK_NULL_HANDLE};
     VmaAllocator m_allocator{VK_NULL_HANDLE};
-    VulkanContext* m_vk{nullptr};
+    VulkanDevice* m_vk{nullptr};
     uint32_t m_default_width{800};
     uint32_t m_default_height{600};
 

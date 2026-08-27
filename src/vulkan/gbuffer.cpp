@@ -4,7 +4,8 @@
 #include <stdexcept>
 #include <utility>
 
-#include <codotaku/vulkan/context.hpp>
+#include <codotaku/system/log.hpp>
+#include <codotaku/vulkan/device.hpp>
 #include <codotaku/vulkan/gbuffer.hpp>
 
 namespace codotaku {
@@ -34,7 +35,7 @@ VkImageAspectFlags get_aspect_mask(VkFormat format) {
 
 } // namespace
 
-GBuffer::GBuffer(VulkanContext& vk, uint32_t default_width, uint32_t default_height) {
+GBuffer::GBuffer(VulkanDevice& vk, uint32_t default_width, uint32_t default_height) {
     init(vk, default_width, default_height);
 }
 
@@ -45,6 +46,7 @@ GBuffer::~GBuffer() {
 GBuffer::GBuffer(GBuffer&& other) noexcept
     : m_device(std::exchange(other.m_device, VK_NULL_HANDLE)),
       m_allocator(std::exchange(other.m_allocator, VK_NULL_HANDLE)),
+      m_vk(std::exchange(other.m_vk, nullptr)),
       m_default_width(std::exchange(other.m_default_width, 0)),
       m_default_height(std::exchange(other.m_default_height, 0)),
       m_attachments(std::move(other.m_attachments)),
@@ -56,6 +58,7 @@ GBuffer& GBuffer::operator=(GBuffer&& other) noexcept {
         cleanup();
         m_device = std::exchange(other.m_device, VK_NULL_HANDLE);
         m_allocator = std::exchange(other.m_allocator, VK_NULL_HANDLE);
+        m_vk = std::exchange(other.m_vk, nullptr);
         m_default_width = std::exchange(other.m_default_width, 0);
         m_default_height = std::exchange(other.m_default_height, 0);
         m_attachments = std::move(other.m_attachments);
@@ -65,7 +68,7 @@ GBuffer& GBuffer::operator=(GBuffer&& other) noexcept {
     return *this;
 }
 
-void GBuffer::init(VulkanContext& vk, uint32_t default_width, uint32_t default_height) {
+void GBuffer::init(VulkanDevice& vk, uint32_t default_width, uint32_t default_height) {
     cleanup();
     m_vk = &vk;
     m_device = vk.get_device();
@@ -76,7 +79,7 @@ void GBuffer::init(VulkanContext& vk, uint32_t default_width, uint32_t default_h
 
 void GBuffer::cleanup() {
     if (m_device != VK_NULL_HANDLE && m_allocator != VK_NULL_HANDLE) {
-        vkDeviceWaitIdle(m_device);
+        if (m_vk) m_vk->get_table().vkDeviceWaitIdle(m_device);
         for (auto& att : m_attachments) {
             if (att.active) {
                 free_attachment_resources(att);
@@ -93,7 +96,7 @@ void GBuffer::cleanup() {
 
 uint32_t GBuffer::add_attachment(const AttachmentDesc& desc) {
     if (m_device == VK_NULL_HANDLE || m_allocator == VK_NULL_HANDLE) {
-        throw std::runtime_error("GBuffer must be initialized with VulkanContext before adding attachments");
+        throw std::runtime_error("GBuffer must be initialized with VulkanDevice before adding attachments");
     }
 
     uint32_t id = 0;
@@ -118,7 +121,7 @@ uint32_t GBuffer::add_attachment(const AttachmentDesc& desc) {
     allocate_attachment_resources(att);
     m_active_count++;
 
-    std::println("[Codotaku GBuffer] Created attachment [{}] '{}' ({}x{}, format: {})",
+    log_info("[Codotaku GBuffer] Created attachment [{}] '{}' ({}x{}, format: {})",
         id, att.name, att.width, att.height, static_cast<int>(att.format));
 
     return id;
@@ -130,7 +133,7 @@ void GBuffer::remove_attachment(uint32_t id) {
     }
 
     auto& att = m_attachments[id];
-    std::println("[Codotaku GBuffer] Destroying attachment [{}] '{}'", id, att.name);
+    log_info("[Codotaku GBuffer] Destroying attachment [{}] '{}'", id, att.name);
     free_attachment_resources(att);
     att.active = false;
     m_free_indices.push_back(id);
@@ -146,8 +149,8 @@ void GBuffer::resize(uint32_t id, uint32_t new_width, uint32_t new_height) {
     auto& att = m_attachments[id];
     if (att.width == new_width && att.height == new_height) return;
 
-    if (m_device != VK_NULL_HANDLE) {
-        vkDeviceWaitIdle(m_device);
+    if (m_device != VK_NULL_HANDLE && m_vk) {
+        m_vk->get_table().vkDeviceWaitIdle(m_device);
     }
 
     free_attachment_resources(att);
@@ -161,8 +164,8 @@ void GBuffer::resize_all(uint32_t new_width, uint32_t new_height) {
     m_default_width = new_width;
     m_default_height = new_height;
 
-    if (m_device != VK_NULL_HANDLE) {
-        vkDeviceWaitIdle(m_device);
+    if (m_device != VK_NULL_HANDLE && m_vk) {
+        m_vk->get_table().vkDeviceWaitIdle(m_device);
     }
 
     for (auto& att : m_attachments) {
@@ -210,8 +213,12 @@ VkRenderingAttachmentInfo GBuffer::get_rendering_attachment_info(
 
     VkRenderingAttachmentInfo info{
         .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        .pNext = nullptr,
         .imageView = att.view,
         .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .resolveMode = VK_RESOLVE_MODE_NONE,
+        .resolveImageView = VK_NULL_HANDLE,
+        .resolveImageLayout = VK_IMAGE_LAYOUT_UNDEFINED,
         .loadOp = load_op,
         .storeOp = store_op,
         .clearValue = att.desc.clear_value,
@@ -240,6 +247,7 @@ void GBuffer::transition(
 
     VkImageMemoryBarrier2 barrier{
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .pNext = nullptr,
         .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
         .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
         .dstStageMask = dst_stage,
@@ -254,11 +262,19 @@ void GBuffer::transition(
 
     VkDependencyInfo dep_info{
         .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .pNext = nullptr,
+        .dependencyFlags = 0,
+        .memoryBarrierCount = 0,
+        .pMemoryBarriers = nullptr,
+        .bufferMemoryBarrierCount = 0,
+        .pBufferMemoryBarriers = nullptr,
         .imageMemoryBarrierCount = 1,
         .pImageMemoryBarriers = &barrier,
     };
 
-    vkCmdPipelineBarrier2(cmd, &dep_info);
+    if (m_vk) {
+        m_vk->get_table().vkCmdPipelineBarrier2(cmd, &dep_info);
+    }
     att.current_layout = new_layout;
 }
 
@@ -270,6 +286,8 @@ void GBuffer::allocate_attachment_resources(Attachment& att) {
 
     VkImageCreateInfo image_info{
         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
         .imageType = VK_IMAGE_TYPE_2D,
         .format = att.format,
         .extent = { att.width, att.height, 1 },
@@ -279,6 +297,8 @@ void GBuffer::allocate_attachment_resources(Attachment& att) {
         .tiling = VK_IMAGE_TILING_OPTIMAL,
         .usage = usage,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0,
+        .pQueueFamilyIndices = nullptr,
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
     };
 
@@ -290,11 +310,18 @@ void GBuffer::allocate_attachment_resources(Attachment& att) {
         throw std::runtime_error("Failed to allocate GBuffer image via VMA for attachment: " + att.name);
     }
 
+    if (m_vk) {
+        m_vk->set_name(att.image, att.name.c_str());
+    }
+
     VkImageViewCreateInfo view_info{
         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
         .image = att.image,
         .viewType = VK_IMAGE_VIEW_TYPE_2D,
         .format = att.format,
+        .components = {},
         .subresourceRange = {
             .aspectMask = att.aspect_mask,
             .baseMipLevel = 0,
@@ -304,7 +331,7 @@ void GBuffer::allocate_attachment_resources(Attachment& att) {
         },
     };
 
-    if (vkCreateImageView(m_device, &view_info, nullptr, &att.view) != VK_SUCCESS) {
+    if (m_vk->get_table().vkCreateImageView(m_device, &view_info, nullptr, &att.view) != VK_SUCCESS) {
         vmaDestroyImage(m_allocator, att.image, att.allocation);
         att.image = VK_NULL_HANDLE;
         att.allocation = VK_NULL_HANDLE;
@@ -312,9 +339,11 @@ void GBuffer::allocate_attachment_resources(Attachment& att) {
     }
 
     if (m_vk) {
+        m_vk->set_name(att.view, (att.name + "_view").c_str());
         m_vk->execute_single_time_commands([&](VkCommandBuffer cmd) {
             VkImageMemoryBarrier2 init_barrier{
                 .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                .pNext = nullptr,
                 .srcStageMask = VK_PIPELINE_STAGE_2_NONE,
                 .srcAccessMask = VK_ACCESS_2_NONE,
                 .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
@@ -335,10 +364,16 @@ void GBuffer::allocate_attachment_resources(Attachment& att) {
 
             VkDependencyInfo dep{
                 .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                .pNext = nullptr,
+                .dependencyFlags = 0,
+                .memoryBarrierCount = 0,
+                .pMemoryBarriers = nullptr,
+                .bufferMemoryBarrierCount = 0,
+                .pBufferMemoryBarriers = nullptr,
                 .imageMemoryBarrierCount = 1,
                 .pImageMemoryBarriers = &init_barrier,
             };
-            vkCmdPipelineBarrier2(cmd, &dep);
+            m_vk->get_table().vkCmdPipelineBarrier2(cmd, &dep);
         });
     }
 
@@ -347,7 +382,7 @@ void GBuffer::allocate_attachment_resources(Attachment& att) {
 
 void GBuffer::free_attachment_resources(Attachment& att) {
     if (att.view != VK_NULL_HANDLE) {
-        vkDestroyImageView(m_device, att.view, nullptr);
+        if (m_vk) m_vk->get_table().vkDestroyImageView(m_device, att.view, nullptr);
         att.view = VK_NULL_HANDLE;
     }
     if (att.image != VK_NULL_HANDLE) {

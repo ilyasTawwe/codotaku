@@ -3,7 +3,7 @@
 #include <vector>
 #include <volk.h>
 #include <codotaku/shader/slang_compiler.hpp>
-#include <codotaku/vulkan/context.hpp>
+#include <codotaku/vulkan/device.hpp>
 #include <codotaku/vulkan/descriptor_heap.hpp>
 
 namespace codotaku {
@@ -30,19 +30,21 @@ public:
 
     // Initialize Graphics Dynamic Rendering Pipeline with Descriptor Heap
     void init_dynamic_rendering_bda(
-        VulkanContext& vk,
+        VulkanDevice& vk,
         const CompiledShaders& shaders,
         VkFormat color_format,
         VkFormat depth_format,
         const std::vector<DescriptorBindingMapping>& mappings = {},
         VkCullModeFlags cull_mode = VK_CULL_MODE_BACK_BIT,
-        VkFrontFace front_face = VK_FRONT_FACE_COUNTER_CLOCKWISE);
+        VkFrontFace front_face = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+        const char* debug_name = "Graphics Dynamic Rendering Pipeline");
 
     // Initialize Compute Pipeline with Descriptor Heap
     void init_compute(
-        VulkanContext& vk,
+        VulkanDevice& vk,
         const CompiledShaders& shaders,
-        const std::vector<DescriptorBindingMapping>& mappings = {});
+        const std::vector<DescriptorBindingMapping>& mappings = {},
+        const char* debug_name = "Compute Pipeline");
 
     void cleanup();
 
@@ -62,6 +64,7 @@ public:
 
 private:
     VkDevice m_device{VK_NULL_HANDLE};
+    VolkDeviceTable m_table{};
     VkPipeline m_pipeline{VK_NULL_HANDLE};
 };
 

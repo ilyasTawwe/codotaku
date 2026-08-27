@@ -4,7 +4,8 @@
 #include <stdexcept>
 #include <utility>
 
-#include <codotaku/vulkan/context.hpp>
+#include <codotaku/system/log.hpp>
+#include <codotaku/vulkan/device.hpp>
 #include <codotaku/vulkan/uploader.hpp>
 
 namespace codotaku {
@@ -12,45 +13,54 @@ namespace codotaku {
 namespace {
 
 VkDeviceSize align_up(VkDeviceSize offset, VkDeviceSize alignment) {
+    if (alignment == 0) return offset;
     return (offset + alignment - 1) & ~(alignment - 1);
 }
 
 } // namespace
 
-Uploader::Uploader(VulkanContext& vk)
-    : m_device(vk.get_device()),
-      m_queue(vk.get_queue()),
+Uploader::Uploader(VulkanDevice& vk)
+    : m_vk(&vk),
+      m_device(vk.get_device()),
+      m_queue(vk.get_transfer_queue().handle),
       m_allocator(vk.get_allocator()),
-      m_limits(vk.get_alignment_limits()) {
+      m_limits(vk.get_alignment_limits()),
+      m_table(vk.get_table()) {
     VkCommandPoolCreateInfo pool_info{
         .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .pNext = nullptr,
         .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
-        .queueFamilyIndex = vk.get_queue_family_index(),
+        .queueFamilyIndex = vk.get_transfer_queue().family_index,
     };
 
-    if (vkCreateCommandPool(m_device, &pool_info, nullptr, &m_command_pool) != VK_SUCCESS) {
+    if (m_table.vkCreateCommandPool(m_device, &pool_info, nullptr, &m_command_pool) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create Uploader command pool");
     }
 
     VkCommandBufferAllocateInfo alloc_info{
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .pNext = nullptr,
         .commandPool = m_command_pool,
         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
         .commandBufferCount = 1,
     };
 
-    if (vkAllocateCommandBuffers(m_device, &alloc_info, &m_cmd) != VK_SUCCESS) {
+    if (m_table.vkAllocateCommandBuffers(m_device, &alloc_info, &m_cmd) != VK_SUCCESS) {
         throw std::runtime_error("Failed to allocate Uploader command buffer");
     }
 
     VkFenceCreateInfo fence_info{
         .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+        .pNext = nullptr,
         .flags = VK_FENCE_CREATE_SIGNALED_BIT,
     };
 
-    if (vkCreateFence(m_device, &fence_info, nullptr, &m_fence) != VK_SUCCESS) {
+    if (m_table.vkCreateFence(m_device, &fence_info, nullptr, &m_fence) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create Uploader fence");
     }
+
+    m_vk->set_name(m_fence, "Uploader Batch Transfer Fence");
+    m_vk->set_name(m_cmd, "Uploader Batch Command Buffer");
 }
 
 Uploader::~Uploader() {
@@ -59,20 +69,23 @@ Uploader::~Uploader() {
 
     if (m_device != VK_NULL_HANDLE) {
         if (m_fence != VK_NULL_HANDLE) {
-            vkDestroyFence(m_device, m_fence, nullptr);
+            m_table.vkDestroyFence(m_device, m_fence, nullptr);
             m_fence = VK_NULL_HANDLE;
         }
         if (m_command_pool != VK_NULL_HANDLE) {
-            vkDestroyCommandPool(m_device, m_command_pool, nullptr);
+            m_table.vkDestroyCommandPool(m_device, m_command_pool, nullptr);
             m_command_pool = VK_NULL_HANDLE;
         }
     }
 }
 
 Uploader::Uploader(Uploader&& other) noexcept
-    : m_device(std::exchange(other.m_device, VK_NULL_HANDLE)),
+    : m_vk(other.m_vk),
+      m_device(std::exchange(other.m_device, VK_NULL_HANDLE)),
       m_queue(std::exchange(other.m_queue, VK_NULL_HANDLE)),
       m_allocator(std::exchange(other.m_allocator, VK_NULL_HANDLE)),
+      m_limits(other.m_limits),
+      m_table(other.m_table),
       m_command_pool(std::exchange(other.m_command_pool, VK_NULL_HANDLE)),
       m_cmd(std::exchange(other.m_cmd, VK_NULL_HANDLE)),
       m_fence(std::exchange(other.m_fence, VK_NULL_HANDLE)),
@@ -89,9 +102,12 @@ Uploader& Uploader::operator=(Uploader&& other) noexcept {
         wait();
         free_staging_resources();
 
+        m_vk = other.m_vk;
         m_device = std::exchange(other.m_device, VK_NULL_HANDLE);
         m_queue = std::exchange(other.m_queue, VK_NULL_HANDLE);
         m_allocator = std::exchange(other.m_allocator, VK_NULL_HANDLE);
+        m_limits = other.m_limits;
+        m_table = other.m_table;
         m_command_pool = std::exchange(other.m_command_pool, VK_NULL_HANDLE);
         m_cmd = std::exchange(other.m_cmd, VK_NULL_HANDLE);
         m_fence = std::exchange(other.m_fence, VK_NULL_HANDLE);
@@ -106,15 +122,30 @@ Uploader& Uploader::operator=(Uploader&& other) noexcept {
     return *this;
 }
 
+void Uploader::free_staging_resources() {
+    if (m_staging_buffer != VK_NULL_HANDLE && m_allocator != VK_NULL_HANDLE) {
+        vmaDestroyBuffer(m_allocator, m_staging_buffer, m_staging_allocation);
+        m_staging_buffer = VK_NULL_HANDLE;
+        m_staging_allocation = VK_NULL_HANDLE;
+        m_staging_mapped_ptr = nullptr;
+        m_staging_capacity = 0;
+    }
+}
+
 BufferAllocation Uploader::upload_buffer(
     const void* data,
     VkDeviceSize size,
     VkBufferUsageFlags usage,
-    VkDeviceSize alignment) {
-    if (size == 0) return {};
+    VkDeviceSize alignment,
+    const char* debug_name) {
+    if (size == 0) {
+        return {};
+    }
 
     VkBufferCreateInfo buffer_info{
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
         .size = size,
         .usage = usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
@@ -124,28 +155,33 @@ BufferAllocation Uploader::upload_buffer(
         .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
     };
 
-    BufferAllocation alloc{};
-    alloc.size = size;
+    BufferAllocation result{};
+    result.size = size;
 
-    if (vmaCreateBuffer(m_allocator, &buffer_info, &alloc_info, &alloc.buffer, &alloc.allocation, nullptr) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to allocate device-local buffer via VMA");
+    if (vmaCreateBuffer(m_allocator, &buffer_info, &alloc_info, &result.buffer, &result.allocation, nullptr) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to allocate destination GPU buffer in Uploader");
     }
 
-    VkBufferDeviceAddressInfo address_info{
+    VkBufferDeviceAddressInfo bda_info{
         .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
-        .buffer = alloc.buffer,
+        .pNext = nullptr,
+        .buffer = result.buffer,
     };
-    alloc.device_address = vkGetBufferDeviceAddress(m_device, &address_info);
+    result.device_address = m_table.vkGetBufferDeviceAddress(m_device, &bda_info);
 
-    m_buffer_tasks.push_back({
-        .dst_buffer = alloc.buffer,
+    if (debug_name && m_vk) {
+        m_vk->set_name(result.buffer, debug_name);
+    }
+
+    m_buffer_tasks.push_back(BufferUploadTask{
+        .dst_buffer = result.buffer,
         .dst_offset = 0,
         .data = data,
         .size = size,
         .staging_offset = 0,
     });
 
-    return alloc;
+    return result;
 }
 
 GpuVirtualSuballocation Uploader::upload_to_arena(
@@ -153,15 +189,17 @@ GpuVirtualSuballocation Uploader::upload_to_arena(
     const void* data,
     VkDeviceSize size,
     VkDeviceSize alignment) {
-    auto sub = arena.suballocate(size, alignment);
-    m_buffer_tasks.push_back({
+    auto suballoc = arena.suballocate(size, alignment);
+
+    m_buffer_tasks.push_back(BufferUploadTask{
         .dst_buffer = arena.get_buffer(),
-        .dst_offset = sub.offset,
+        .dst_offset = suballoc.offset,
         .data = data,
         .size = size,
         .staging_offset = 0,
     });
-    return sub;
+
+    return suballoc;
 }
 
 Texture Uploader::upload_texture(
@@ -170,90 +208,17 @@ Texture Uploader::upload_texture(
     VkFormat format,
     std::span<const uint8_t> pixel_data,
     const TextureDesc& desc) {
-    TextureDesc final_desc = desc;
-    final_desc.format = format;
-    final_desc.width = width;
-    final_desc.height = height;
+    if (!m_vk) throw std::runtime_error("Uploader has invalid device pointer");
 
-    VkImageCreateInfo image_info{
-        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-        .imageType = VK_IMAGE_TYPE_2D,
-        .format = format,
-        .extent = { width, height, 1 },
-        .mipLevels = 1,
-        .arrayLayers = 1,
-        .samples = VK_SAMPLE_COUNT_1_BIT,
-        .tiling = VK_IMAGE_TILING_OPTIMAL,
-        .usage = final_desc.usage | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-    };
+    Texture tex = Texture::create_uninitialized(*m_vk, width, height, desc);
 
-    VmaAllocationCreateInfo alloc_info{
-        .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
-    };
-
-    VkImage image = VK_NULL_HANDLE;
-    VmaAllocation allocation = VK_NULL_HANDLE;
-    if (vmaCreateImage(m_allocator, &image_info, &alloc_info, &image, &allocation, nullptr) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to allocate GPU texture image via VMA: " + final_desc.name);
-    }
-
-    VkImageViewCreateInfo view_info{
-        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-        .image = image,
-        .viewType = VK_IMAGE_VIEW_TYPE_2D,
-        .format = format,
-        .subresourceRange = {
-            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-            .baseMipLevel = 0,
-            .levelCount = 1,
-            .baseArrayLayer = 0,
-            .layerCount = 1,
-        },
-    };
-
-    VkImageView view = VK_NULL_HANDLE;
-    if (vkCreateImageView(m_device, &view_info, nullptr, &view) != VK_SUCCESS) {
-        vmaDestroyImage(m_allocator, image, allocation);
-        throw std::runtime_error("Failed to create texture image view: " + final_desc.name);
-    }
-
-    VkSamplerCreateInfo sampler_info{
-        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-        .magFilter = final_desc.mag_filter,
-        .minFilter = final_desc.min_filter,
-        .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
-        .addressModeU = final_desc.address_mode,
-        .addressModeV = final_desc.address_mode,
-        .addressModeW = final_desc.address_mode,
-        .mipLodBias = 0.0f,
-        .anisotropyEnable = VK_TRUE,
-        .maxAnisotropy = 16.0f,
-        .compareEnable = VK_FALSE,
-        .minLod = 0.0f,
-        .maxLod = 0.0f,
-        .borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK,
-        .unnormalizedCoordinates = VK_FALSE,
-    };
-
-    VkSampler sampler = VK_NULL_HANDLE;
-    if (vkCreateSampler(m_device, &sampler_info, nullptr, &sampler) != VK_SUCCESS) {
-        vkDestroyImageView(m_device, view, nullptr);
-        vmaDestroyImage(m_allocator, image, allocation);
-        throw std::runtime_error("Failed to create texture sampler: " + final_desc.name);
-    }
-
-    Texture tex;
-    tex.init(m_device, m_allocator, image, view, allocation, sampler, final_desc);
-
-    m_image_tasks.push_back({
-        .dst_image = image,
+    m_image_tasks.push_back(ImageUploadTask{
+        .dst_image = tex.get_image(),
         .extent = { width, height, 1 },
         .format = format,
         .data = pixel_data.data(),
         .size = pixel_data.size_bytes(),
-        .target_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        .target_layout = VK_IMAGE_LAYOUT_GENERAL,
         .staging_offset = 0,
     });
 
@@ -265,85 +230,92 @@ void Uploader::upload() {
         return;
     }
 
-    if (m_in_flight) {
-        wait();
-    }
+    wait();
 
-    // 1. Calculate required staging buffer size taking hardware alignments into account
-    VkDeviceSize required_size = 0;
-    VkDeviceSize buffer_align = std::max({VkDeviceSize(16), m_limits.min_storage_buffer_offset_alignment, m_limits.optimal_buffer_copy_offset_alignment});
+    VkDeviceSize current_staging_offset = 0;
+    VkDeviceSize copy_alignment = m_limits.optimal_buffer_copy_offset_alignment;
+
     for (auto& task : m_buffer_tasks) {
-        required_size = align_up(required_size, buffer_align);
-        task.staging_offset = required_size;
-        required_size += task.size;
+        current_staging_offset = align_up(current_staging_offset, copy_alignment);
+        task.staging_offset = current_staging_offset;
+        current_staging_offset += task.size;
     }
 
-    VkDeviceSize image_align = std::max({VkDeviceSize(16), m_limits.optimal_buffer_copy_offset_alignment, m_limits.optimal_buffer_copy_row_pitch_alignment});
     for (auto& task : m_image_tasks) {
-        required_size = align_up(required_size, image_align);
-        task.staging_offset = required_size;
-        required_size += task.size;
+        current_staging_offset = align_up(current_staging_offset, copy_alignment);
+        task.staging_offset = current_staging_offset;
+        current_staging_offset += task.size;
     }
 
-    if (required_size == 0) return;
+    VkDeviceSize required_staging_size = current_staging_offset;
 
-    // 2. Lazily allocate or reuse existing staging buffer
-    if (m_staging_buffer == VK_NULL_HANDLE || required_size > m_staging_capacity) {
+    if (m_staging_capacity < required_staging_size) {
         free_staging_resources();
+
+        m_staging_capacity = std::max(required_staging_size, m_staging_capacity * 2);
 
         VkBufferCreateInfo staging_info{
             .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-            .size = required_size,
+            .pNext = nullptr,
+            .flags = 0,
+            .size = m_staging_capacity,
             .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
             .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
         };
 
         VmaAllocationCreateInfo staging_alloc_info{
-            .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT,
+            .flags = VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
             .usage = VMA_MEMORY_USAGE_AUTO,
         };
 
-        VmaAllocationInfo mapped_info{};
-        if (vmaCreateBuffer(m_allocator, &staging_info, &staging_alloc_info, &m_staging_buffer, &m_staging_allocation, &mapped_info) != VK_SUCCESS) {
-            throw std::runtime_error("Failed to allocate staging buffer in Uploader");
+        VmaAllocationInfo alloc_res{};
+        if (vmaCreateBuffer(m_allocator, &staging_info, &staging_alloc_info, &m_staging_buffer, &m_staging_allocation, &alloc_res) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to allocate dynamic staging buffer in Uploader");
         }
 
-        m_staging_capacity = required_size;
-        m_staging_mapped_ptr = mapped_info.pMappedData;
-        std::println("[Codotaku Uploader] Lazily allocated/recreated staging buffer (Capacity: {} KB)", m_staging_capacity / 1024);
+        m_staging_mapped_ptr = alloc_res.pMappedData;
+        if (m_vk) m_vk->set_name(m_staging_buffer, "Uploader Staging Buffer");
+        log_debug("[Codotaku Uploader] Lazily allocated staging buffer (Capacity: {} KB)", m_staging_capacity / 1024);
     }
 
-    uint8_t* mapped_ptr = static_cast<uint8_t*>(m_staging_mapped_ptr);
-
-    // 3. Copy all data into staging memory
+    // Copy CPU memory into host-mapped staging buffer
     for (const auto& task : m_buffer_tasks) {
-        std::memcpy(mapped_ptr + task.staging_offset, task.data, task.size);
-    }
-    for (const auto& task : m_image_tasks) {
-        std::memcpy(mapped_ptr + task.staging_offset, task.data, task.size);
+        if (task.data && task.size > 0) {
+            std::memcpy(static_cast<uint8_t*>(m_staging_mapped_ptr) + task.staging_offset, task.data, task.size);
+        }
     }
 
-    // 4. Record batched GPU DMA transfer commands
-    vkResetFences(m_device, 1, &m_fence);
-    vkResetCommandBuffer(m_cmd, 0);
+    for (const auto& task : m_image_tasks) {
+        if (task.data && task.size > 0) {
+            std::memcpy(static_cast<uint8_t*>(m_staging_mapped_ptr) + task.staging_offset, task.data, task.size);
+        }
+    }
+
+    vmaFlushAllocation(m_allocator, m_staging_allocation, 0, required_staging_size);
+
+    m_table.vkResetFences(m_device, 1, &m_fence);
 
     VkCommandBufferBeginInfo begin_info{
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .pNext = nullptr,
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+        .pInheritanceInfo = nullptr,
     };
-    vkBeginCommandBuffer(m_cmd, &begin_info);
+    m_table.vkBeginCommandBuffer(m_cmd, &begin_info);
 
-    // Copy buffers
+    if (m_vk) m_vk->begin_debug_label(m_cmd, "Batch GPU Upload", {0.2f, 0.8f, 0.3f, 1.0f});
+
+    // 1. Record Buffer Transfers
     for (const auto& task : m_buffer_tasks) {
         VkBufferCopy copy_region{
             .srcOffset = task.staging_offset,
             .dstOffset = task.dst_offset,
             .size = task.size,
         };
-        vkCmdCopyBuffer(m_cmd, m_staging_buffer, task.dst_buffer, 1, &copy_region);
+        m_table.vkCmdCopyBuffer(m_cmd, m_staging_buffer, task.dst_buffer, 1, &copy_region);
     }
 
-    // Copy images with Synchronization 2 layout transitions
+    // 2. Record Image Transfers
     for (const auto& task : m_image_tasks) {
         VkImageSubresourceRange subresource_range{
             .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
@@ -353,27 +325,33 @@ void Uploader::upload() {
             .layerCount = 1,
         };
 
-        // Transition: UNDEFINED -> TRANSFER_DST_OPTIMAL
-        VkImageMemoryBarrier2 barrier_to_transfer{
+        VkImageMemoryBarrier2 pre_copy_barrier{
             .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+            .pNext = nullptr,
             .srcStageMask = VK_PIPELINE_STAGE_2_NONE,
             .srcAccessMask = VK_ACCESS_2_NONE,
-            .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            .dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT,
             .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
             .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-            .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            .newLayout = VK_IMAGE_LAYOUT_GENERAL,
             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .image = task.dst_image,
             .subresourceRange = subresource_range,
         };
 
-        VkDependencyInfo dep_to_transfer{
+        VkDependencyInfo pre_dep{
             .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+            .pNext = nullptr,
+            .dependencyFlags = 0,
+            .memoryBarrierCount = 0,
+            .pMemoryBarriers = nullptr,
+            .bufferMemoryBarrierCount = 0,
+            .pBufferMemoryBarriers = nullptr,
             .imageMemoryBarrierCount = 1,
-            .pImageMemoryBarriers = &barrier_to_transfer,
+            .pImageMemoryBarriers = &pre_copy_barrier,
         };
-        vkCmdPipelineBarrier2(m_cmd, &dep_to_transfer);
+        m_table.vkCmdPipelineBarrier2(m_cmd, &pre_dep);
 
         VkBufferImageCopy copy_region{
             .bufferOffset = task.staging_offset,
@@ -385,19 +363,20 @@ void Uploader::upload() {
                 .baseArrayLayer = 0,
                 .layerCount = 1,
             },
-            .imageOffset = {0, 0, 0},
+            .imageOffset = { 0, 0, 0 },
             .imageExtent = task.extent,
         };
-        vkCmdCopyBufferToImage(m_cmd, m_staging_buffer, task.dst_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy_region);
 
-        // Transition: TRANSFER_DST_OPTIMAL -> target_layout
-        VkImageMemoryBarrier2 barrier_to_target{
+        m_table.vkCmdCopyBufferToImage(m_cmd, m_staging_buffer, task.dst_image, VK_IMAGE_LAYOUT_GENERAL, 1, &copy_region);
+
+        VkImageMemoryBarrier2 post_copy_barrier{
             .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-            .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            .pNext = nullptr,
+            .srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT,
             .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
             .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-            .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_SHADER_READ_BIT,
-            .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
+            .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
             .newLayout = task.target_layout,
             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
@@ -405,56 +384,60 @@ void Uploader::upload() {
             .subresourceRange = subresource_range,
         };
 
-        VkDependencyInfo dep_to_target{
+        VkDependencyInfo post_dep{
             .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+            .pNext = nullptr,
+            .dependencyFlags = 0,
+            .memoryBarrierCount = 0,
+            .pMemoryBarriers = nullptr,
+            .bufferMemoryBarrierCount = 0,
+            .pBufferMemoryBarriers = nullptr,
             .imageMemoryBarrierCount = 1,
-            .pImageMemoryBarriers = &barrier_to_target,
+            .pImageMemoryBarriers = &post_copy_barrier,
         };
-        vkCmdPipelineBarrier2(m_cmd, &dep_to_target);
+        m_table.vkCmdPipelineBarrier2(m_cmd, &post_dep);
     }
 
-    vkEndCommandBuffer(m_cmd);
+    if (m_vk) m_vk->end_debug_label(m_cmd);
 
-    // 5. Submit to queue with fence
+    m_table.vkEndCommandBuffer(m_cmd);
+
     VkSubmitInfo submit_info{
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .pNext = nullptr,
+        .waitSemaphoreCount = 0,
+        .pWaitSemaphores = nullptr,
+        .pWaitDstStageMask = nullptr,
         .commandBufferCount = 1,
         .pCommandBuffers = &m_cmd,
+        .signalSemaphoreCount = 0,
+        .pSignalSemaphores = nullptr,
     };
 
-    if (vkQueueSubmit(m_queue, 1, &submit_info, m_fence) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to submit Uploader batch command buffer");
+    if (m_table.vkQueueSubmit(m_queue, 1, &submit_info, m_fence) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to submit batch upload commands to queue");
     }
 
     m_in_flight = true;
-
-    // Reset task queues so new items can be added immediately for subsequent batches
     m_buffer_tasks.clear();
     m_image_tasks.clear();
 
-    std::println("[Codotaku Uploader] Submitted batch upload (batch size: {} KB) - executing in background.",
-        required_size / 1024);
+    log_debug("[Codotaku Uploader] Submitted batch upload (batch size: {} KB) - executing asynchronously.",
+        required_staging_size / 1024);
 }
 
 void Uploader::wait(uint64_t timeout_ns) {
-    if (!m_in_flight) return;
-    vkWaitForFences(m_device, 1, &m_fence, VK_TRUE, timeout_ns);
-    m_in_flight = false;
+    if (m_in_flight && m_fence != VK_NULL_HANDLE) {
+        m_table.vkWaitForFences(m_device, 1, &m_fence, VK_TRUE, timeout_ns);
+        m_in_flight = false;
+    }
 }
 
 bool Uploader::is_ready() const {
-    if (!m_in_flight) return true;
-    return vkGetFenceStatus(m_device, m_fence) == VK_SUCCESS;
-}
-
-void Uploader::free_staging_resources() {
-    if (m_staging_buffer != VK_NULL_HANDLE) {
-        vmaDestroyBuffer(m_allocator, m_staging_buffer, m_staging_allocation);
-        m_staging_buffer = VK_NULL_HANDLE;
-        m_staging_allocation = VK_NULL_HANDLE;
-        m_staging_mapped_ptr = nullptr;
-        m_staging_capacity = 0;
+    if (!m_in_flight) {
+        return true;
     }
+    return (m_table.vkGetFenceStatus(m_device, m_fence) == VK_SUCCESS);
 }
 
 } // namespace codotaku

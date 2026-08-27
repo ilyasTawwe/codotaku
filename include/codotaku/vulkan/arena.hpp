@@ -6,6 +6,8 @@
 
 namespace codotaku {
 
+class VulkanDevice;
+
 struct GpuVirtualSuballocation {
     VmaVirtualAllocation handle{VK_NULL_HANDLE};
     VkDeviceSize offset{0};
@@ -24,7 +26,20 @@ public:
     GpuBufferArena(GpuBufferArena&& other) noexcept;
     GpuBufferArena& operator=(GpuBufferArena&& other) noexcept;
 
-    void init(VmaAllocator allocator, VkDevice device, VkDeviceSize size, VkBufferUsageFlags usage, VmaAllocationCreateFlags vma_flags);
+    void init(
+        VulkanDevice& vk,
+        VkDeviceSize size,
+        VkBufferUsageFlags usage,
+        VmaAllocationCreateFlags vma_flags,
+        const char* debug_name = "GPU Buffer Arena");
+
+    void init(
+        VmaAllocator allocator,
+        VkDevice device,
+        VkDeviceSize size,
+        VkBufferUsageFlags usage,
+        VmaAllocationCreateFlags vma_flags);
+
     GpuVirtualSuballocation suballocate(VkDeviceSize req_size, VkDeviceSize alignment = 16);
     void free_suballocation(GpuVirtualSuballocation& sub);
     void reset();

@@ -210,14 +210,14 @@ int main() {
         // 1. Create Uploader immediately at startup
         codotaku::Uploader uploader(vk);
 
-        // 2. Allocate Static Geometry Arena (4 MB)
+        // 2. Allocate Static Geometry Arena (4 MB) with custom debug name
         codotaku::GpuBufferArena geometry_arena;
         geometry_arena.init(
-            vk.get_allocator(),
-            vk.get_device(),
+            vk,
             4 * 1024 * 1024,
             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
-            VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+            VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
+            "Static Geometry Arena");
 
         // 3. Enqueue geometry uploads into Geometry Arena (returns BDA suballocation immediately)
         auto vb_sub = uploader.upload_to_arena(geometry_arena, std::span(CUBE_VERTICES));

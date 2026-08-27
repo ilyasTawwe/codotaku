@@ -2,7 +2,8 @@
 #include <stdexcept>
 #include <utility>
 
-#include <codotaku/vulkan/context.hpp>
+#include <codotaku/vulkan/descriptor_heap.hpp>
+#include <codotaku/vulkan/device.hpp>
 #include <codotaku/vulkan/texture.hpp>
 
 namespace codotaku {
@@ -11,7 +12,7 @@ Texture::~Texture() {
     cleanup();
 }
 
-Texture::    Texture(Texture&& other) noexcept
+Texture::Texture(Texture&& other) noexcept
     : m_device(std::exchange(other.m_device, VK_NULL_HANDLE)),
       m_allocator(std::exchange(other.m_allocator, VK_NULL_HANDLE)),
       m_desc(std::exchange(other.m_desc, {})),
@@ -59,7 +60,7 @@ void Texture::init(
 }
 
 Texture Texture::create_uninitialized(
-    VulkanContext& vk,
+    VulkanDevice& vk,
     uint32_t width,
     uint32_t height,
     const TextureDesc& desc) {
@@ -72,6 +73,8 @@ Texture Texture::create_uninitialized(
 
     VkImageCreateInfo image_info{
         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
         .imageType = VK_IMAGE_TYPE_2D,
         .format = final_desc.format,
         .extent = { width, height, 1 },
@@ -81,6 +84,8 @@ Texture Texture::create_uninitialized(
         .tiling = VK_IMAGE_TILING_OPTIMAL,
         .usage = final_desc.usage | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0,
+        .pQueueFamilyIndices = nullptr,
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
     };
 
@@ -93,12 +98,16 @@ Texture Texture::create_uninitialized(
     if (vmaCreateImage(allocator, &image_info, &alloc_info, &image, &allocation, nullptr) != VK_SUCCESS) {
         throw std::runtime_error("Failed to allocate GPU texture image via VMA: " + final_desc.name);
     }
+    vk.set_name(image, final_desc.name.c_str());
 
     VkImageViewCreateInfo view_info{
         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
         .image = image,
         .viewType = VK_IMAGE_VIEW_TYPE_2D,
         .format = final_desc.format,
+        .components = {},
         .subresourceRange = {
             .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
             .baseMipLevel = 0,
@@ -109,13 +118,16 @@ Texture Texture::create_uninitialized(
     };
 
     VkImageView view = VK_NULL_HANDLE;
-    if (vkCreateImageView(device, &view_info, nullptr, &view) != VK_SUCCESS) {
+    if (vk.get_table().vkCreateImageView(device, &view_info, nullptr, &view) != VK_SUCCESS) {
         vmaDestroyImage(allocator, image, allocation);
         throw std::runtime_error("Failed to create texture image view: " + final_desc.name);
     }
+    vk.set_name(view, (final_desc.name + "_view").c_str());
 
     VkSamplerCreateInfo sampler_info{
         .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
         .magFilter = final_desc.mag_filter,
         .minFilter = final_desc.min_filter,
         .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
@@ -126,6 +138,7 @@ Texture Texture::create_uninitialized(
         .anisotropyEnable = VK_TRUE,
         .maxAnisotropy = 16.0f,
         .compareEnable = VK_FALSE,
+        .compareOp = VK_COMPARE_OP_ALWAYS,
         .minLod = 0.0f,
         .maxLod = 0.0f,
         .borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK,
@@ -133,11 +146,12 @@ Texture Texture::create_uninitialized(
     };
 
     VkSampler sampler = VK_NULL_HANDLE;
-    if (vkCreateSampler(device, &sampler_info, nullptr, &sampler) != VK_SUCCESS) {
-        vkDestroyImageView(device, view, nullptr);
+    if (vk.get_table().vkCreateSampler(device, &sampler_info, nullptr, &sampler) != VK_SUCCESS) {
+        vk.get_table().vkDestroyImageView(device, view, nullptr);
         vmaDestroyImage(allocator, image, allocation);
         throw std::runtime_error("Failed to create texture sampler: " + final_desc.name);
     }
+    vk.set_name(sampler, (final_desc.name + "_sampler").c_str());
 
     Texture tex;
     tex.init(device, allocator, image, view, allocation, sampler, final_desc);
@@ -148,9 +162,12 @@ void Texture::write_to_descriptor_heap(DescriptorHeap& heap) {
     if (m_image != VK_NULL_HANDLE) {
         VkImageViewCreateInfo view_ci{
             .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
             .image = m_image,
             .viewType = VK_IMAGE_VIEW_TYPE_2D,
             .format = m_desc.format,
+            .components = {},
             .subresourceRange = {
                 .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
                 .baseMipLevel = 0,
@@ -170,6 +187,8 @@ void Texture::write_to_descriptor_heap(DescriptorHeap& heap) {
     if (m_sampler != VK_NULL_HANDLE) {
         VkSamplerCreateInfo sampler_info{
             .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
             .magFilter = m_desc.mag_filter,
             .minFilter = m_desc.min_filter,
             .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
@@ -180,6 +199,7 @@ void Texture::write_to_descriptor_heap(DescriptorHeap& heap) {
             .anisotropyEnable = VK_TRUE,
             .maxAnisotropy = 16.0f,
             .compareEnable = VK_FALSE,
+            .compareOp = VK_COMPARE_OP_ALWAYS,
             .minLod = 0.0f,
             .maxLod = 0.0f,
             .borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK,

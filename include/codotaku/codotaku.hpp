@@ -7,6 +7,8 @@
 #include <codotaku/system/log.hpp>
 #include <codotaku/wayland/context.hpp>
 #include <codotaku/wayland/window.hpp>
+#include <codotaku/vulkan/instance.hpp>
+#include <codotaku/vulkan/device.hpp>
 #include <codotaku/vulkan/context.hpp>
 #include <codotaku/vulkan/arena.hpp>
 #include <codotaku/vulkan/sync.hpp>

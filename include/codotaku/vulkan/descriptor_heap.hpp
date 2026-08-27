@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <volk.h>
 #include <vk_mem_alloc.h>
-#include <codotaku/vulkan/context.hpp>
+#include <codotaku/vulkan/device.hpp>
 
 namespace codotaku {
 
@@ -19,7 +19,7 @@ public:
     DescriptorHeap& operator=(DescriptorHeap&& other) noexcept;
 
     void init(
-        VulkanContext& vk,
+        VulkanDevice& vk,
         VkDeviceSize resource_heap_size = 4 * 1024 * 1024,
         VkDeviceSize sampler_heap_size = 64 * 1024);
 
@@ -51,8 +51,10 @@ public:
     VkDeviceSize get_sampler_heap_size() const { return m_sampler_heap_size; }
 
 private:
+    VulkanDevice* m_vk{nullptr};
     VkDevice m_device{VK_NULL_HANDLE};
     VmaAllocator m_allocator{VK_NULL_HANDLE};
+    VolkDeviceTable m_table{};
 
     // Resource Heap
     VkBuffer m_resource_buffer{VK_NULL_HANDLE};
