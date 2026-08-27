@@ -126,7 +126,80 @@ cmake --build --preset release
 ## Example Usage
 
 ```cpp
+#include <chrono>
+#include <iostream>
+#include <print>
 #include <codotaku/codotaku.hpp>
+
+// Slang Shader with 64-bit Buffer Device Address (BDA) pointer dereferencing
+const char* SHADER_SLANG_CODE = R"(
+struct Vertex {
+    float3 position;
+    float3 color;
+    float3 normal;
+};
+
+struct SceneData {
+    float4x4 view_proj;
+    float4x4 view;
+    float4x4 proj;
+    float4x4 model;
+    float3 camera_pos;
+    float time;
+
+    float3 light_dir;
+    float ambient_intensity;
+    float3 light_color;
+    float _pad0;
+
+    float3 tint;
+    float _pad1;
+
+    uint64_t vertexBufferAddress;
+    uint64_t indexBufferAddress;
+    uint64_t indirectCommandsAddress;
+    uint64_t customDataAddress;
+};
+
+// 8-byte 64-bit Root Buffer GPU pointer
+struct PushConstants {
+    uint64_t sceneDataAddress;
+};
+[[vk::push_constant]] PushConstants pc;
+
+struct VertexOutput {
+    float4 position : SV_Position;
+    float3 color : COLOR;
+    float3 normal : NORMAL;
+};
+
+[shader("vertex")]
+VertexOutput vsMain(uint indexID : SV_VertexID) {
+    SceneData* scene = (SceneData*)pc.sceneDataAddress;
+    uint16_t* indices = (uint16_t*)scene->indexBufferAddress;
+    Vertex* vertices  = (Vertex*)scene->vertexBufferAddress;
+
+    uint vertexIndex = indices[indexID];
+    Vertex input     = vertices[vertexIndex];
+
+    VertexOutput output;
+    float4 worldPos = mul(float4(input.position, 1.0), scene->model);
+    output.position = mul(worldPos, scene->view_proj);
+    output.color    = input.color * scene->tint;
+    output.normal   = normalize(mul(input.normal, (float3x3)scene->model));
+    return output;
+}
+
+[shader("fragment")]
+float4 fsMain(VertexOutput input) : SV_Target {
+    SceneData* scene = (SceneData*)pc.sceneDataAddress;
+    float3 lightDir = normalize(scene->light_dir);
+    float diff = max(dot(input.normal, lightDir), 0.0);
+    float3 ambient = scene->ambient_intensity * input.color;
+    float3 diffuse = diff * input.color * scene->light_color;
+    return float4(ambient + diffuse, 1.0);
+}
+)";
 
 int main() {
     try {
