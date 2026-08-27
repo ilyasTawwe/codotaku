@@ -46,7 +46,7 @@ const zxdg_toplevel_decoration_v1_listener decoration_listener = {
 
 } // namespace
 
-void FrameContext::begin_rendering(VkClearColorValue clear_color, float clear_depth) const {
+void FrameContext::begin_rendering(VkClearColorValue clear_color, VkImageView depth_view, float clear_depth) const {
     VkRenderingAttachmentInfo color_attachment{
         .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
         .imageView = color_image_view,
@@ -60,7 +60,7 @@ void FrameContext::begin_rendering(VkClearColorValue clear_color, float clear_de
 
     VkRenderingAttachmentInfo depth_attachment{
         .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        .imageView = depth_image_view,
+        .imageView = depth_view,
         .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
         .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
         .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
@@ -78,10 +78,17 @@ void FrameContext::begin_rendering(VkClearColorValue clear_color, float clear_de
         .layerCount = 1,
         .colorAttachmentCount = 1,
         .pColorAttachments = &color_attachment,
-        .pDepthAttachment = (depth_image_view != VK_NULL_HANDLE) ? &depth_attachment : nullptr,
+        .pDepthAttachment = (depth_view != VK_NULL_HANDLE) ? &depth_attachment : nullptr,
     };
 
     vkCmdBeginRendering(cmd, &rendering_info);
+}
+
+void FrameContext::begin_rendering_with_attachment(VkClearColorValue clear_color, uint32_t depth_attachment_id, float clear_depth) const {
+    VkImageView depth_view = gbuffer.has_attachment(depth_attachment_id)
+                                 ? gbuffer.get_view(depth_attachment_id)
+                                 : VK_NULL_HANDLE;
+    begin_rendering(clear_color, depth_view, clear_depth);
 }
 
 void FrameContext::end_rendering() const {
@@ -117,19 +124,12 @@ Window::Window(WaylandContext& wl, VulkanContext& vk, WindowConfig config)
     choose_color_format(wl);
     create_dmabuf_buffers(wl, vk);
 
-    // Initialize per-window GBuffer
+    // Initialize per-window GBuffer (managed by Window, populated by user)
     m_gbuffer.init(vk, m_width, m_height);
 
-    // Add default depth attachment to GBuffer
-    m_depth_attachment_id = m_gbuffer.add_attachment({
-        .name = "window_depth_buffer",
-        .format = VK_FORMAT_D32_SFLOAT,
-        .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-    });
-
-    // Add any user-specified extra attachments
-    for (const auto& extra_att : m_config.extra_attachments) {
-        m_gbuffer.add_attachment(extra_att);
+    // Add user-defined initial attachments if configured
+    for (const auto& att : m_config.attachments) {
+        m_gbuffer.add_attachment(att);
     }
 
     init_frame_arena(vk);
@@ -521,7 +521,7 @@ void Window::recreate_buffers(VulkanContext& vk) {
     cleanup_dmabuf_buffers(vk);
     create_dmabuf_buffers(*m_wayland_ctx, vk);
 
-    // Automatically bulk resize the window's GBuffer attachments
+    // Automatically bulk resize all user attachments inside the window's GBuffer
     m_gbuffer.resize_all(m_width, m_height);
 
     m_current_buffer_idx = 0;
@@ -587,33 +587,17 @@ std::optional<FrameContext> Window::begin_frame(VulkanContext& vk) {
     };
     vkCmdPipelineBarrier2(cmd, &dep_color);
 
-    // Transition GBuffer Depth attachment to DEPTH_ATTACHMENT_OPTIMAL
-    if (m_gbuffer.has_attachment(m_depth_attachment_id)) {
-        m_gbuffer.transition(
-            cmd,
-            m_depth_attachment_id,
-            VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-            VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-            VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
-    }
-
     float aspect = (m_height > 0) ? (static_cast<float>(m_width) / static_cast<float>(m_height)) : 1.0f;
-
-    VkImageView depth_view = m_gbuffer.has_attachment(m_depth_attachment_id)
-                                 ? m_gbuffer.get_view(m_depth_attachment_id)
-                                 : VK_NULL_HANDLE;
 
     return FrameContext{
         .cmd = cmd,
         .color_image_view = buf.view,
-        .depth_image_view = depth_view,
         .width = m_width,
         .height = m_height,
         .aspect_ratio = aspect,
         .buffer_index = m_current_buffer_idx,
         .frame_arena = m_frame_arena,
         .gbuffer = m_gbuffer,
-        .depth_attachment_id = m_depth_attachment_id,
     };
 }
 

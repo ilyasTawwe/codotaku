@@ -58,7 +58,7 @@ struct WindowConfig {
     size_t buffer_count{DEFAULT_BUFFER_COUNT};
     PresentMode present_mode{PresentMode::Fifo};
     FormatSelector format_selector{nullptr};
-    std::vector<AttachmentDesc> extra_attachments; // Additional GBuffer attachments
+    std::vector<AttachmentDesc> attachments; // User-defined initial GBuffer attachments
     bool is_primary{false};
     WindowCloseCallback on_close{nullptr};
 };

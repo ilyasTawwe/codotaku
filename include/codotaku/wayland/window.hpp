@@ -35,16 +35,15 @@ struct DmaBufBuffer {
 struct FrameContext {
     VkCommandBuffer cmd{VK_NULL_HANDLE};
     VkImageView color_image_view{VK_NULL_HANDLE};
-    VkImageView depth_image_view{VK_NULL_HANDLE};
     uint32_t width{0};
     uint32_t height{0};
     float aspect_ratio{1.0f};
     size_t buffer_index{0};
     GpuBufferArena& frame_arena;
     GBuffer& gbuffer;
-    uint32_t depth_attachment_id{0};
 
-    void begin_rendering(VkClearColorValue clear_color, float clear_depth = 1.0f) const;
+    void begin_rendering(VkClearColorValue clear_color, VkImageView depth_view = VK_NULL_HANDLE, float clear_depth = 1.0f) const;
+    void begin_rendering_with_attachment(VkClearColorValue clear_color, uint32_t depth_attachment_id, float clear_depth = 1.0f) const;
     void end_rendering() const;
     void set_viewport_and_scissor() const;
 };
@@ -74,7 +73,6 @@ public:
 
     GBuffer& get_gbuffer() { return m_gbuffer; }
     const GBuffer& get_gbuffer() const { return m_gbuffer; }
-    uint32_t get_depth_attachment_id() const { return m_depth_attachment_id; }
 
     void close();
     void handle_toplevel_configure(int32_t width, int32_t height);
@@ -117,7 +115,6 @@ private:
 
     std::vector<DmaBufBuffer> m_buffers;
     GBuffer m_gbuffer{};
-    uint32_t m_depth_attachment_id{0};
     GpuBufferArena m_frame_arena{};
     size_t m_current_buffer_idx{0};
 

@@ -35,10 +35,11 @@ Inspired by modern Linux presentation paradigms (such as NVIDIA's `egl-wayland2`
 - **Texture Management & Slang Texture Sampling**:
   - `codotaku::Texture`: Loads RGBA8 pixel buffers or procedural patterns (checkerboard, grid) via VMA staging buffers with Synchronization 2 uploads.
   - Full anisotropic sampler creation and automatic Slang descriptor set reflection (`[[vk::binding(0, 0)]] Sampler2D`).
-- **Integrated GBuffer per Window with Automatic Bulk Resizing**:
-  - Each `Window` automatically owns its integrated `GBuffer` (default depth attachment + optional user `extra_attachments`).
-  - Automatically resizes all attachment images in bulk on window resize events without manual user bookkeeping.
-  - Add and delete render targets dynamically at runtime, receiving a stable index handle to retrieve `VkImageView`, `VkImage`, `VkFormat`, or `VkRenderingAttachmentInfo`.
+- **Window-Managed GBuffer with Automatic Bulk Resizing**:
+  - Each `Window` owns and manages a `GBuffer` instance for its render targets.
+  - Users populate attachments (depth, HDR albedo, normals, etc.) via `WindowConfig::attachments` or `window.get_gbuffer().add_attachment(...)`.
+  - On window resize events, all attachments in the window's GBuffer are automatically recreated in bulk matching the new resolution.
+  - Retrieve raw Vulkan handles at any time via stable integer handle IDs.
 - **Generic Mesh & Buffer Uploading**:
   - Templated mesh uploading (`app.upload_mesh(vertices, indices)`) accepting any user-defined vertex and index format.
   - The library imposes zero hardcoded vertex or scene struct layout restrictions.

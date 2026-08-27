@@ -188,7 +188,14 @@ int main() {
         // 5. Create 3D Camera
         codotaku::Camera camera({0.0f, 1.4f, 3.2f}, {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, 45.0f);
 
-        // 6. Spawn Windows (Each window automatically owns its integrated GBuffer!)
+        // Common depth attachment specification defined by user code
+        codotaku::AttachmentDesc depth_desc = {
+            .name = "depth_buffer",
+            .format = VK_FORMAT_D32_SFLOAT,
+            .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        };
+
+        // 6. Spawn Windows (Configuring user-defined attachments for each window's GBuffer)
         app.set_close_policy(codotaku::WindowClosePolicy::QuitOnLastWindowClose);
 
         app.create_window({
@@ -203,6 +210,7 @@ int main() {
                 }
                 return available.front();
             },
+            .attachments = { depth_desc },
             .is_primary = true,
         });
 
@@ -212,8 +220,9 @@ int main() {
             .height = 600,
             .buffer_count = 2,
             .present_mode = codotaku::PresentMode::Immediate,
-            // Example of adding extra offscreen GBuffer attachment to Window 2
-            .extra_attachments = {
+            // User populates depth + an extra HDR render target attachment!
+            .attachments = {
+                depth_desc,
                 {
                     .name = "hdr_albedo_rt",
                     .format = VK_FORMAT_R16G16B16A16_SFLOAT,
@@ -228,6 +237,7 @@ int main() {
             .height = 500,
             .buffer_count = 3,
             .present_mode = codotaku::PresentMode::Fifo,
+            .attachments = { depth_desc },
             .on_close = [](codotaku::Window& win) {
                 std::println("[Custom Hook] Window '{}' intercepting close event.", win.get_title());
                 return true;
@@ -236,7 +246,7 @@ int main() {
 
         auto start_time = std::chrono::steady_clock::now();
 
-        // 7. Transparent, Non-intrusive Render Loop (User controls command recording & submission!)
+        // 7. Transparent Render Loop (User controls GBuffer attachments, recording & draw calls!)
         int ret = app.run([&](codotaku::Window& window, codotaku::FrameContext& frame) {
             auto now = std::chrono::steady_clock::now();
             float time_sec = std::chrono::duration<float>(now - start_time).count();
@@ -271,8 +281,16 @@ int main() {
             scene->indexBufferAddress = mesh.index_address;
             scene->indirectCommandsAddress = indirect_batch.device_address;
 
-            // Direct Vulkan Dynamic Rendering pass (using window's color DMA-BUF + GBuffer depth!)
-            frame.begin_rendering({.float32 = {0.05f, 0.05f, 0.08f, 1.0f}}, 1.0f);
+            // Transition user's depth attachment in the window's GBuffer (ID 0)
+            frame.gbuffer.transition(
+                frame.cmd,
+                0, // depth attachment ID
+                VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+
+            // Direct Vulkan Dynamic Rendering pass (using window color DMA-BUF + GBuffer depth!)
+            frame.begin_rendering_with_attachment({.float32 = {0.05f, 0.05f, 0.08f, 1.0f}}, 0 /* depth_attachment_id */, 1.0f);
             frame.set_viewport_and_scissor();
 
             vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.get_pipeline());
