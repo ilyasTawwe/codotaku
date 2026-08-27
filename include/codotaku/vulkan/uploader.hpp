@@ -120,6 +120,7 @@ private:
     VkDevice m_device{VK_NULL_HANDLE};
     VkQueue m_queue{VK_NULL_HANDLE};
     VmaAllocator m_allocator{VK_NULL_HANDLE};
+    DeviceAlignmentLimits m_limits{};
 
     VkCommandPool m_command_pool{VK_NULL_HANDLE};
     VkCommandBuffer m_cmd{VK_NULL_HANDLE};

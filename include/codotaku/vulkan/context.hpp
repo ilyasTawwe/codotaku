@@ -8,6 +8,14 @@
 
 namespace codotaku {
 
+struct DeviceAlignmentLimits {
+    VkDeviceSize min_storage_buffer_offset_alignment{16};
+    VkDeviceSize min_uniform_buffer_offset_alignment{16};
+    VkDeviceSize optimal_buffer_copy_offset_alignment{16};
+    VkDeviceSize optimal_buffer_copy_row_pitch_alignment{16};
+    VkDeviceSize min_memory_map_alignment{64};
+};
+
 class VulkanContext {
 public:
     VulkanContext();
@@ -22,6 +30,7 @@ public:
     uint32_t get_queue_family_index() const { return m_queue_family_index; }
     VkQueue get_queue() const { return m_queue; }
     const VkPhysicalDeviceMemoryProperties& get_memory_properties() const { return m_memory_properties; }
+    const DeviceAlignmentLimits& get_alignment_limits() const { return m_alignment_limits; }
     VmaAllocator get_allocator() const { return m_allocator; }
     int get_drm_fd() const { return m_drm_fd; }
 
@@ -44,6 +53,7 @@ private:
     uint32_t m_queue_family_index{0};
     VkQueue m_queue{VK_NULL_HANDLE};
     VkPhysicalDeviceMemoryProperties m_memory_properties{};
+    DeviceAlignmentLimits m_alignment_limits{};
 
     VmaAllocator m_allocator{VK_NULL_HANDLE};
     int m_drm_fd{-1};

@@ -96,9 +96,29 @@ void VulkanContext::init_instance() {
         .pfnUserCallback = debug_callback,
     };
 
+    // Enable Synchronization Validation feature
+    VkValidationFeatureEnableEXT validation_enables[] = {
+        VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT,
+    };
+
+    VkValidationFeaturesEXT validation_features{
+        .sType = VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT,
+        .pNext = debug_utils_found ? &debug_create_info : nullptr,
+        .enabledValidationFeatureCount = static_cast<uint32_t>(sizeof(validation_enables) / sizeof(validation_enables[0])),
+        .pEnabledValidationFeatures = validation_enables,
+    };
+
+    void* instance_pnext = nullptr;
+    if (validation_found) {
+        instance_pnext = &validation_features;
+        std::println("[Codotaku] Enabled Synchronization Validation layer feature.");
+    } else if (debug_utils_found) {
+        instance_pnext = &debug_create_info;
+    }
+
     VkInstanceCreateInfo create_info{
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-        .pNext = debug_utils_found ? &debug_create_info : nullptr,
+        .pNext = instance_pnext,
         .pApplicationInfo = &app_info,
         .enabledLayerCount = static_cast<uint32_t>(enabled_layers.size()),
         .ppEnabledLayerNames = enabled_layers.data(),
@@ -151,9 +171,23 @@ void VulkanContext::select_physical_device() {
 
     vkGetPhysicalDeviceMemoryProperties(m_physical_device, &m_memory_properties);
 
-    VkPhysicalDeviceProperties props;
-    vkGetPhysicalDeviceProperties(m_physical_device, &props);
-    std::println("[Codotaku] Selected GPU: {}", props.deviceName);
+    // Query Physical Device Properties & Alignment Limits
+    VkPhysicalDeviceProperties2 props2{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+    };
+    vkGetPhysicalDeviceProperties2(m_physical_device, &props2);
+
+    m_alignment_limits.min_storage_buffer_offset_alignment = props2.properties.limits.minStorageBufferOffsetAlignment;
+    m_alignment_limits.min_uniform_buffer_offset_alignment = props2.properties.limits.minUniformBufferOffsetAlignment;
+    m_alignment_limits.min_memory_map_alignment = props2.properties.limits.minMemoryMapAlignment;
+    m_alignment_limits.optimal_buffer_copy_offset_alignment = std::max(VkDeviceSize(16), props2.properties.limits.optimalBufferCopyOffsetAlignment);
+    m_alignment_limits.optimal_buffer_copy_row_pitch_alignment = std::max(VkDeviceSize(16), props2.properties.limits.optimalBufferCopyRowPitchAlignment);
+
+    std::println("[Codotaku] Selected GPU: {} (Storage Align: {} B, Optimal Copy Align: {} B, Pitch Align: {} B)",
+        props2.properties.deviceName,
+        m_alignment_limits.min_storage_buffer_offset_alignment,
+        m_alignment_limits.optimal_buffer_copy_offset_alignment,
+        m_alignment_limits.optimal_buffer_copy_row_pitch_alignment);
 }
 
 void VulkanContext::create_logical_device() {

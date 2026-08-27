@@ -20,7 +20,8 @@ VkDeviceSize align_up(VkDeviceSize offset, VkDeviceSize alignment) {
 Uploader::Uploader(VulkanContext& vk)
     : m_device(vk.get_device()),
       m_queue(vk.get_queue()),
-      m_allocator(vk.get_allocator()) {
+      m_allocator(vk.get_allocator()),
+      m_limits(vk.get_alignment_limits()) {
     VkCommandPoolCreateInfo pool_info{
         .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
         .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
@@ -268,16 +269,18 @@ void Uploader::upload() {
         wait();
     }
 
-    // 1. Calculate required staging buffer size taking alignments into account
+    // 1. Calculate required staging buffer size taking hardware alignments into account
     VkDeviceSize required_size = 0;
+    VkDeviceSize buffer_align = std::max({VkDeviceSize(16), m_limits.min_storage_buffer_offset_alignment, m_limits.optimal_buffer_copy_offset_alignment});
     for (auto& task : m_buffer_tasks) {
-        required_size = align_up(required_size, 16);
+        required_size = align_up(required_size, buffer_align);
         task.staging_offset = required_size;
         required_size += task.size;
     }
 
+    VkDeviceSize image_align = std::max({VkDeviceSize(16), m_limits.optimal_buffer_copy_offset_alignment, m_limits.optimal_buffer_copy_row_pitch_alignment});
     for (auto& task : m_image_tasks) {
-        required_size = align_up(required_size, 16);
+        required_size = align_up(required_size, image_align);
         task.staging_offset = required_size;
         required_size += task.size;
     }
