@@ -12,6 +12,7 @@
 #include <codotaku/core/types.hpp>
 #include <codotaku/vulkan/arena.hpp>
 #include <codotaku/vulkan/context.hpp>
+#include <codotaku/vulkan/gbuffer.hpp>
 #include <codotaku/vulkan/sync.hpp>
 #include <codotaku/wayland/context.hpp>
 
@@ -31,12 +32,6 @@ struct DmaBufBuffer {
     uint64_t last_release_point{0};
 };
 
-struct DepthBuffer {
-    VkImage image{VK_NULL_HANDLE};
-    VkImageView view{VK_NULL_HANDLE};
-    VmaAllocation allocation{VK_NULL_HANDLE};
-};
-
 struct FrameContext {
     VkCommandBuffer cmd{VK_NULL_HANDLE};
     VkImageView color_image_view{VK_NULL_HANDLE};
@@ -46,6 +41,8 @@ struct FrameContext {
     float aspect_ratio{1.0f};
     size_t buffer_index{0};
     GpuBufferArena& frame_arena;
+    GBuffer& gbuffer;
+    uint32_t depth_attachment_id{0};
 
     void begin_rendering(VkClearColorValue clear_color, float clear_depth = 1.0f) const;
     void end_rendering() const;
@@ -75,6 +72,10 @@ public:
     void set_primary(bool primary) { m_config.is_primary = primary; }
     void set_close_callback(WindowCloseCallback callback) { m_config.on_close = std::move(callback); }
 
+    GBuffer& get_gbuffer() { return m_gbuffer; }
+    const GBuffer& get_gbuffer() const { return m_gbuffer; }
+    uint32_t get_depth_attachment_id() const { return m_depth_attachment_id; }
+
     void close();
     void handle_toplevel_configure(int32_t width, int32_t height);
     void handle_surface_configure();
@@ -89,8 +90,6 @@ private:
     void choose_color_format(WaylandContext& wl);
     void create_dmabuf_buffers(WaylandContext& wl, VulkanContext& vk);
     void cleanup_dmabuf_buffers(VulkanContext& vk);
-    void create_depth_buffer(VulkanContext& vk);
-    void cleanup_depth_buffer(VulkanContext& vk);
     void init_frame_arena(VulkanContext& vk);
     void recreate_buffers(VulkanContext& vk);
     void create_command_resources(VulkanContext& vk);
@@ -117,7 +116,8 @@ private:
     DrmTimeline m_release_timeline{};
 
     std::vector<DmaBufBuffer> m_buffers;
-    DepthBuffer m_depth{};
+    GBuffer m_gbuffer{};
+    uint32_t m_depth_attachment_id{0};
     GpuBufferArena m_frame_arena{};
     size_t m_current_buffer_idx{0};
 

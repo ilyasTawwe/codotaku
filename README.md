@@ -35,13 +35,16 @@ Inspired by modern Linux presentation paradigms (such as NVIDIA's `egl-wayland2`
 - **Texture Management & Slang Texture Sampling**:
   - `codotaku::Texture`: Loads RGBA8 pixel buffers or procedural patterns (checkerboard, grid) via VMA staging buffers with Synchronization 2 uploads.
   - Full anisotropic sampler creation and automatic Slang descriptor set reflection (`[[vk::binding(0, 0)]] Sampler2D`).
-- **Dynamic GBuffer & RenderTarget Pool Abstraction**:
-  - Dynamically allocate $N$ images with arbitrary formats, usages, dimensions, and sample counts.
-  - Recreates all attachments in bulk with `gbuffer.resize_all(w, h)` or individually with `gbuffer.resize(id, w, h)`.
+- **Integrated GBuffer per Window with Automatic Bulk Resizing**:
+  - Each `Window` automatically owns its integrated `GBuffer` (default depth attachment + optional user `extra_attachments`).
+  - Automatically resizes all attachment images in bulk on window resize events without manual user bookkeeping.
   - Add and delete render targets dynamically at runtime, receiving a stable index handle to retrieve `VkImageView`, `VkImage`, `VkFormat`, or `VkRenderingAttachmentInfo`.
-- **Built-in 3D Camera & Scene Abstractions**:
+- **Generic Mesh & Buffer Uploading**:
+  - Templated mesh uploading (`app.upload_mesh(vertices, indices)`) accepting any user-defined vertex and index format.
+  - The library imposes zero hardcoded vertex or scene struct layout restrictions.
+- **Built-in 3D Camera Abstraction**:
   - `codotaku::Camera`: Full perspective, view matrix (`lookAt`), orbit, zoom, and Vulkan NDC clip space alignment.
-  - `codotaku::SceneData`: Camera matrices, lighting parameters, and hierarchical BDA addresses.
+  - `codotaku::MeshHandle`: 64-bit BDA address handles for vertex and index buffers.
 - **Configurable Presentation & Windowing Options**:
   - Configurable double/triple buffering (`buffer_count`).
   - VSync control (`PresentMode::Fifo` vs `PresentMode::Immediate`).
@@ -66,9 +69,9 @@ codotaku/
 │   └── codotaku/
 │       ├── codotaku.hpp                   # Master convenience include
 │       ├── core/
-│       │   ├── types.hpp                  # Common structs (Vertex, WindowConfig, ColorFormat)
+│       │   ├── types.hpp                  # Common structs (WindowConfig, ColorFormat, AttachmentDesc)
 │       │   ├── camera.hpp                 # 3D Camera (Perspective, LookAt, Orbit, Zoom)
-│       │   └── scene.hpp                  # SceneData & MeshHandle
+│       │   └── scene.hpp                  # Generic MeshHandle
 │       ├── wayland/
 │       │   ├── context.hpp                # Wayland display, registry, protocols
 │       │   └── window.hpp                 # Multi-window lifecycle, FrameContext, DMA-BUF pool
@@ -86,12 +89,12 @@ codotaku/
 │           └── application.hpp            # Application framework & non-blocking event loop
 ├── src/
 │   ├── wayland/ (context.cpp, window.cpp)
-│   ├── vulkan/  (context.cpp, arena.cpp, sync.cpp, pipeline.cpp)
+│   ├── vulkan/  (context.cpp, arena.cpp, sync.cpp, texture.cpp, gbuffer.cpp, pipeline.cpp)
 │   ├── shader/  (slang_compiler.cpp)
 │   └── app/     (application.cpp)
 └── examples/
     └── multiwindow_cubes/
-        └── main.cpp                       # Consumer example code (< 80 lines)
+        └── main.cpp                       # Consumer example code
 ```
 
 ---
@@ -141,128 +144,97 @@ cmake --build --preset release
 #include <print>
 #include <codotaku/codotaku.hpp>
 
-// Slang Shader with 64-bit Buffer Device Address (BDA) pointer dereferencing
-const char* SHADER_SLANG_CODE = R"(
-struct Vertex {
-    float3 position;
-    float3 color;
-    float3 normal;
+// 1. User-defined Vertex Format (No fixed library vertex restriction!)
+struct CustomVertex {
+    glm::vec3 pos;
+    glm::vec3 color;
+    glm::vec3 normal;
+    glm::vec2 uv;
 };
 
-struct SceneData {
-    float4x4 view_proj;
-    float4x4 view;
-    float4x4 proj;
-    float4x4 model;
-    float3 camera_pos;
-    float time;
-
-    float3 light_dir;
-    float ambient_intensity;
-    float3 light_color;
-    float _pad0;
-
-    float3 tint;
-    float _pad1;
-
-    uint64_t vertexBufferAddress;
-    uint64_t indexBufferAddress;
-    uint64_t indirectCommandsAddress;
-    uint64_t customDataAddress;
+// 2. User-defined Scene Data matching Slang shader layout
+struct CustomSceneData {
+    glm::mat4 view_proj{1.0f};
+    glm::mat4 view{1.0f};
+    glm::mat4 proj{1.0f};
+    glm::mat4 model{1.0f};
+    glm::vec3 camera_pos{0.0f, 0.0f, 0.0f};
+    float time{0.0f};
+    glm::vec3 light_dir{0.5f, 0.8f, 0.7f};
+    float ambient_intensity{0.35f};
+    glm::vec3 light_color{1.0f, 1.0f, 1.0f};
+    float _pad0{0.0f};
+    glm::vec3 tint{1.0f, 1.0f, 1.0f};
+    float _pad1{0.0f};
+    uint64_t vertexBufferAddress{0};
+    uint64_t indexBufferAddress{0};
+    uint64_t indirectCommandsAddress{0};
+    uint64_t customDataAddress{0};
 };
-
-// 8-byte 64-bit Root Buffer GPU pointer
-struct PushConstants {
-    uint64_t sceneDataAddress;
-};
-[[vk::push_constant]] PushConstants pc;
-
-struct VertexOutput {
-    float4 position : SV_Position;
-    float3 color : COLOR;
-    float3 normal : NORMAL;
-};
-
-[shader("vertex")]
-VertexOutput vsMain(uint indexID : SV_VertexID) {
-    SceneData* scene = (SceneData*)pc.sceneDataAddress;
-    uint16_t* indices = (uint16_t*)scene->indexBufferAddress;
-    Vertex* vertices  = (Vertex*)scene->vertexBufferAddress;
-
-    uint vertexIndex = indices[indexID];
-    Vertex input     = vertices[vertexIndex];
-
-    VertexOutput output;
-    float4 worldPos = mul(float4(input.position, 1.0), scene->model);
-    output.position = mul(worldPos, scene->view_proj);
-    output.color    = input.color * scene->tint;
-    output.normal   = normalize(mul(input.normal, (float3x3)scene->model));
-    return output;
-}
-
-[shader("fragment")]
-float4 fsMain(VertexOutput input) : SV_Target {
-    SceneData* scene = (SceneData*)pc.sceneDataAddress;
-    float3 lightDir = normalize(scene->light_dir);
-    float diff = max(dot(input.normal, lightDir), 0.0);
-    float3 ambient = scene->ambient_intensity * input.color;
-    float3 diffuse = diff * input.color * scene->light_color;
-    return float4(ambient + diffuse, 1.0);
-}
-)";
 
 int main() {
     try {
         codotaku::Application app("Codotaku Engine Demo");
 
-        // 1. Upload Mesh to the Static Geometry Arena
+        // Upload Mesh to the Static Geometry Arena (Generic templated upload)
         auto mesh = app.upload_mesh(CUBE_VERTICES, CUBE_INDICES);
 
-        // 2. Upload Indirect Draw Command to Static Arena
+        // Upload Indirect Draw Command to Static Arena
         auto indirect_batch = app.upload_indirect_command({
             .vertexCount = mesh.index_count,
         });
 
-        // 3. Compile Slang Shader & Create Dynamic Rendering Pipeline
+        // Compile Slang Shader & Create Dynamic Rendering Pipeline
         auto pipeline = app.create_pipeline(SHADER_SLANG_CODE);
 
-        // 4. Create 3D Camera
+        // Create Textures & Descriptor Sets
+        auto texture = codotaku::Texture::create_checkerboard(app.get_vulkan(), 256, 256, 32);
+        VkDescriptorSet tex_desc_set = pipeline.create_texture_descriptor_set(texture, 0, 0);
+
+        // Create 3D Camera
         codotaku::Camera camera({0.0f, 1.4f, 3.2f}, {0.0f, 0.0f, 0.0f});
 
-        // 5. Spawn Windows with configurable Buffer Count, VSync mode, and Format Selector
+        // Spawn Windows (Each window automatically owns an integrated GBuffer!)
         app.create_window({
-            .title = "Window 1 (Triple Buffer, VSync ON, Cyan)",
+            .title = "Window 1 (Triple Buffer, VSync ON)",
             .width = 800, .height = 600,
             .buffer_count = 3,
             .present_mode = codotaku::PresentMode::Fifo,
-            .format_selector = [](auto available) { return available.front(); }
+            .is_primary = true,
         });
 
         app.create_window({
-            .title = "Window 2 (Double Buffer, Immediate, Gold)",
+            .title = "Window 2 (Double Buffer, Immediate)",
             .width = 600, .height = 600,
             .buffer_count = 2,
             .present_mode = codotaku::PresentMode::Immediate,
+            // Configure extra GBuffer attachments if needed
+            .extra_attachments = {
+                {
+                    .name = "hdr_albedo",
+                    .format = VK_FORMAT_R16G16B16A16_SFLOAT,
+                    .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                }
+            }
         });
 
         auto start_time = std::chrono::steady_clock::now();
 
-        // 6. Transparent, Non-intrusive Render Loop (User controls command recording & submission!)
+        // Transparent, Non-intrusive Render Loop (User controls command recording & submission!)
         return app.run([&](codotaku::Window& window, codotaku::FrameContext& frame) {
             float time_sec = std::chrono::duration<float>(std::chrono::steady_clock::now() - start_time).count();
 
-            // Set camera aspect ratio matching the active window
+            // Camera aspect ratio matches active window
             camera.set_aspect_ratio(frame.aspect_ratio);
 
-            // Suballocate per-frame SceneData inside the window's dynamic frame arena
-            auto scene_suballoc = frame.frame_arena.suballocate(sizeof(codotaku::SceneData), 64);
-            auto* scene = reinterpret_cast<codotaku::SceneData*>(
+            // Suballocate per-frame CustomSceneData inside window's dynamic frame arena
+            auto scene_suballoc = frame.frame_arena.suballocate(sizeof(CustomSceneData), 64);
+            auto* scene = reinterpret_cast<CustomSceneData*>(
                 static_cast<uint8_t*>(frame.frame_arena.get_mapped_data()) + scene_suballoc.offset);
 
             scene->view_proj = camera.get_view_projection_matrix();
             scene->view = camera.get_view_matrix();
             scene->proj = camera.get_projection_matrix();
-            scene->camera_pos = camera.get_position();
             scene->time = time_sec;
             scene->vertexBufferAddress = mesh.vertex_address;
             scene->indexBufferAddress = mesh.index_address;
@@ -272,6 +244,8 @@ int main() {
             frame.set_viewport_and_scissor();
 
             vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.get_pipeline());
+            vkCmdBindDescriptorSets(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.get_layout(),
+                                    0, 1, &tex_desc_set, 0, nullptr);
 
             // Push 8-byte Root Scene BDA address
             uint64_t scene_addr = scene_suballoc.device_address;

@@ -6,20 +6,11 @@
 
 #include <volk.h>
 #include <vk_mem_alloc.h>
+#include <codotaku/core/types.hpp>
 
 namespace codotaku {
 
 class VulkanContext;
-
-struct AttachmentDesc {
-    std::string name{"attachment"};
-    VkFormat format{VK_FORMAT_R16G16B16A16_SFLOAT};
-    VkImageUsageFlags usage{VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT};
-    uint32_t width{0};  // 0 = use GBuffer default width
-    uint32_t height{0}; // 0 = use GBuffer default height
-    VkSampleCountFlagBits samples{VK_SAMPLE_COUNT_1_BIT};
-    VkClearValue clear_value{.color = {.float32 = {0.0f, 0.0f, 0.0f, 1.0f}}};
-};
 
 struct Attachment {
     uint32_t id{0};

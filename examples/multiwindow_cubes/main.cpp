@@ -4,8 +4,16 @@
 
 #include <codotaku/codotaku.hpp>
 
+// User/Application-defined Vertex format matching shader layout
+struct CustomVertex {
+    glm::vec3 pos;
+    glm::vec3 color;
+    glm::vec3 normal;
+    glm::vec2 uv;
+};
+
 // 24 vertices for 6 faces with crisp per-face normals & UV coordinates
-const std::vector<codotaku::Vertex> CUBE_VERTICES = {
+const std::vector<CustomVertex> CUBE_VERTICES = {
     // Front face (Z = +0.5) - Red
     { {-0.5f, -0.5f,  0.5f}, {1.0f, 0.25f, 0.25f}, { 0.0f,  0.0f,  1.0f}, {0.0f, 0.0f} },
     { { 0.5f, -0.5f,  0.5f}, {1.0f, 0.25f, 0.25f}, { 0.0f,  0.0f,  1.0f}, {1.0f, 0.0f} },
@@ -52,6 +60,29 @@ const std::vector<uint16_t> CUBE_INDICES = {
     20, 21, 22,  22, 23, 20  // Left
 };
 
+// User/Application-defined Scene Data struct matching shader layout
+struct CustomSceneData {
+    glm::mat4 view_proj{1.0f};
+    glm::mat4 view{1.0f};
+    glm::mat4 proj{1.0f};
+    glm::mat4 model{1.0f};
+    glm::vec3 camera_pos{0.0f, 0.0f, 0.0f};
+    float time{0.0f};
+
+    glm::vec3 light_dir{0.5f, 0.8f, 0.7f};
+    float ambient_intensity{0.35f};
+    glm::vec3 light_color{1.0f, 1.0f, 1.0f};
+    float _pad0{0.0f};
+
+    glm::vec3 tint{1.0f, 1.0f, 1.0f};
+    float _pad1{0.0f};
+
+    uint64_t vertexBufferAddress{0};
+    uint64_t indexBufferAddress{0};
+    uint64_t indirectCommandsAddress{0};
+    uint64_t customDataAddress{0};
+};
+
 const char* SHADER_SLANG_CODE = R"(
 struct Vertex {
     float3 position;
@@ -88,7 +119,7 @@ struct PushConstants {
 };
 [[vk::push_constant]] PushConstants pc;
 
-// Sampled texture binding reflected automatically by Slang
+// Reflected descriptor set texture binding
 [[vk::binding(0, 0)]] Sampler2D u_texture;
 
 struct VertexOutput {
@@ -120,10 +151,7 @@ VertexOutput vsMain(uint indexID : SV_VertexID) {
 float4 fsMain(VertexOutput input) : SV_Target {
     SceneData* scene = (SceneData*)pc.sceneDataAddress;
 
-    // Sample texture
     float4 texColor = u_texture.Sample(input.uv);
-
-    // Directional lighting
     float3 lightDir = normalize(scene->light_dir);
     float diff = max(dot(input.normal, lightDir), 0.0);
     float3 ambient = scene->ambient_intensity * texColor.rgb * input.color;
@@ -134,9 +162,9 @@ float4 fsMain(VertexOutput input) : SV_Target {
 
 int main() {
     try {
-        codotaku::Application app("Codotaku Engine Demo (Textures + GBuffer + Indirect BDA)");
+        codotaku::Application app("Codotaku Engine Demo");
 
-        // 1. Upload Mesh to Static Geometry Arena
+        // 1. Generic Mesh upload to Static Geometry Arena
         auto mesh = app.upload_mesh(CUBE_VERTICES, CUBE_INDICES);
 
         // 2. Upload Indirect Draw Command to Static Arena
@@ -147,7 +175,7 @@ int main() {
             .firstInstance = 0,
         });
 
-        // 3. Compile Slang Shader & Create Dynamic Rendering Pipeline (with reflected texture descriptor layout!)
+        // 3. Compile Slang Shader & Create Dynamic Rendering Pipeline
         auto pipeline = app.create_pipeline(SHADER_SLANG_CODE);
 
         // 4. Create Procedural Textures & Descriptor Sets
@@ -160,64 +188,60 @@ int main() {
         // 5. Create 3D Camera
         codotaku::Camera camera({0.0f, 1.4f, 3.2f}, {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, 45.0f);
 
-        // 6. GBuffer Abstraction
-        codotaku::GBuffer gbuffer(app.get_vulkan(), 800, 600);
-        uint32_t albedo_id = gbuffer.add_attachment({
-            .name = "hdr_albedo",
-            .format = VK_FORMAT_R16G16B16A16_SFLOAT,
-            .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-        });
-        uint32_t depth_id = gbuffer.add_attachment({
-            .name = "depth_buffer",
-            .format = VK_FORMAT_D32_SFLOAT,
-            .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-        });
-
-        // 7. Spawn Windows with configurable Buffer Count, VSync mode, and Close Callbacks
+        // 6. Spawn Windows (Each window automatically owns its integrated GBuffer!)
         app.set_close_policy(codotaku::WindowClosePolicy::QuitOnLastWindowClose);
 
         app.create_window({
-            .title = "Window 1 (Checkerboard Texture - Triple Buffer)",
+            .title = "Window 1 (Primary, Triple Buffer, VSync ON, Checkerboard)",
             .width = 800,
             .height = 600,
             .buffer_count = 3,
             .present_mode = codotaku::PresentMode::Fifo,
+            .format_selector = [](std::span<const codotaku::ColorFormat> available) {
+                for (const auto& fmt : available) {
+                    if (fmt.vk_format == VK_FORMAT_B8G8R8A8_UNORM) return fmt;
+                }
+                return available.front();
+            },
             .is_primary = true,
         });
 
         app.create_window({
-            .title = "Window 2 (Grid Texture - Double Buffer, Uncapped)",
+            .title = "Window 2 (Double Buffer, Immediate, Grid Texture)",
             .width = 600,
             .height = 600,
             .buffer_count = 2,
             .present_mode = codotaku::PresentMode::Immediate,
+            // Example of adding extra offscreen GBuffer attachment to Window 2
+            .extra_attachments = {
+                {
+                    .name = "hdr_albedo_rt",
+                    .format = VK_FORMAT_R16G16B16A16_SFLOAT,
+                    .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                }
+            }
         });
 
         app.create_window({
-            .title = "Window 3 (Checkerboard Texture - Custom Close Hook)",
+            .title = "Window 3 (Triple Buffer, VSync ON, Custom Close Hook)",
             .width = 500,
             .height = 500,
             .buffer_count = 3,
             .present_mode = codotaku::PresentMode::Fifo,
             .on_close = [](codotaku::Window& win) {
-                std::println("[Custom Hook] Window '{}' close requested, accepting.", win.get_title());
+                std::println("[Custom Hook] Window '{}' intercepting close event.", win.get_title());
                 return true;
             },
         });
 
         auto start_time = std::chrono::steady_clock::now();
 
-        // 8. Transparent, Non-intrusive Render Loop
+        // 7. Transparent, Non-intrusive Render Loop (User controls command recording & submission!)
         int ret = app.run([&](codotaku::Window& window, codotaku::FrameContext& frame) {
             auto now = std::chrono::steady_clock::now();
             float time_sec = std::chrono::duration<float>(now - start_time).count();
 
-            // Bulk resize GBuffer when window dimensions change
-            if (gbuffer.get_width(albedo_id) != frame.width || gbuffer.get_height(albedo_id) != frame.height) {
-                gbuffer.resize_all(frame.width, frame.height);
-            }
-
-            // Set camera aspect ratio matching active window
+            // Set camera aspect ratio matching the active window
             camera.set_aspect_ratio(frame.aspect_ratio);
 
             // Compute 3D Model transformation
@@ -226,9 +250,9 @@ int main() {
             model = glm::rotate(model, time_sec * 0.6f, glm::vec3(1.0f, 0.0f, 0.0f));
             model = glm::rotate(model, time_sec * 0.3f, glm::vec3(0.0f, 0.0f, 1.0f));
 
-            // Suballocate per-frame SceneData inside the window's dynamic frame arena
-            auto scene_suballoc = frame.frame_arena.suballocate(sizeof(codotaku::SceneData), 64);
-            auto* scene = reinterpret_cast<codotaku::SceneData*>(
+            // Suballocate per-frame custom SceneData inside the window's dynamic frame arena
+            auto scene_suballoc = frame.frame_arena.suballocate(sizeof(CustomSceneData), 64);
+            auto* scene = reinterpret_cast<CustomSceneData*>(
                 static_cast<uint8_t*>(frame.frame_arena.get_mapped_data()) + scene_suballoc.offset);
 
             scene->view_proj = camera.get_view_projection_matrix();
@@ -247,7 +271,7 @@ int main() {
             scene->indexBufferAddress = mesh.index_address;
             scene->indirectCommandsAddress = indirect_batch.device_address;
 
-            // Direct Vulkan Dynamic Rendering pass!
+            // Direct Vulkan Dynamic Rendering pass (using window's color DMA-BUF + GBuffer depth!)
             frame.begin_rendering({.float32 = {0.05f, 0.05f, 0.08f, 1.0f}}, 1.0f);
             frame.set_viewport_and_scissor();
 
@@ -288,7 +312,6 @@ int main() {
 
         checkerboard_tex.cleanup();
         grid_tex.cleanup();
-        gbuffer.cleanup();
         pipeline.cleanup();
         return ret;
 

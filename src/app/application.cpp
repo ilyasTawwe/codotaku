@@ -53,26 +53,26 @@ Window* Application::create_window(WindowConfig config) {
     return ptr;
 }
 
-MeshHandle Application::upload_mesh(const std::vector<Vertex>& vertices, const std::vector<uint16_t>& indices) {
-    VkDeviceSize vb_size = sizeof(Vertex) * vertices.size();
-    auto vb_sub = m_geometry_arena.suballocate(vb_size, 64);
+MeshHandle Application::upload_mesh_raw(
+    const void* vertex_data, size_t vertex_data_size, uint32_t vertex_count,
+    const void* index_data, size_t index_data_size, uint32_t index_count) {
+    auto vb_sub = m_geometry_arena.suballocate(vertex_data_size, 64);
     std::memcpy(
         static_cast<uint8_t*>(m_geometry_arena.get_mapped_data()) + vb_sub.offset,
-        vertices.data(),
-        vb_size);
+        vertex_data,
+        vertex_data_size);
 
-    VkDeviceSize ib_size = sizeof(uint16_t) * indices.size();
-    auto ib_sub = m_geometry_arena.suballocate(ib_size, 64);
+    auto ib_sub = m_geometry_arena.suballocate(index_data_size, 64);
     std::memcpy(
         static_cast<uint8_t*>(m_geometry_arena.get_mapped_data()) + ib_sub.offset,
-        indices.data(),
-        ib_size);
+        index_data,
+        index_data_size);
 
     return MeshHandle{
         .vertex_address = vb_sub.device_address,
         .index_address = ib_sub.device_address,
-        .vertex_count = static_cast<uint32_t>(vertices.size()),
-        .index_count = static_cast<uint32_t>(indices.size()),
+        .vertex_count = vertex_count,
+        .index_count = index_count,
         .vertex_offset = vb_sub.offset,
         .index_offset = ib_sub.offset,
     };

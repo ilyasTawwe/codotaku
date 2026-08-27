@@ -41,11 +41,14 @@ struct ColorFormat {
 
 using FormatSelector = std::function<ColorFormat(std::span<const ColorFormat> available_formats)>;
 
-struct Vertex {
-    glm::vec3 pos;
-    glm::vec3 color;
-    glm::vec3 normal;
-    glm::vec2 uv;
+struct AttachmentDesc {
+    std::string name{"attachment"};
+    VkFormat format{VK_FORMAT_R16G16B16A16_SFLOAT};
+    VkImageUsageFlags usage{VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT};
+    uint32_t width{0};  // 0 = use window width
+    uint32_t height{0}; // 0 = use window height
+    VkSampleCountFlagBits samples{VK_SAMPLE_COUNT_1_BIT};
+    VkClearValue clear_value{.color = {.float32 = {0.0f, 0.0f, 0.0f, 1.0f}}};
 };
 
 struct WindowConfig {
@@ -55,6 +58,7 @@ struct WindowConfig {
     size_t buffer_count{DEFAULT_BUFFER_COUNT};
     PresentMode present_mode{PresentMode::Fifo};
     FormatSelector format_selector{nullptr};
+    std::vector<AttachmentDesc> extra_attachments; // Additional GBuffer attachments
     bool is_primary{false};
     WindowCloseCallback on_close{nullptr};
 };

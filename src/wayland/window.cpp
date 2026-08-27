@@ -12,7 +12,6 @@ namespace codotaku {
 namespace {
 
 constexpr VkDeviceSize FRAME_ARENA_SIZE = 64 * 1024; // 64 KB Dynamic Frame Arena per window
-constexpr VkFormat DEPTH_FORMAT = VK_FORMAT_D32_SFLOAT;
 
 void xdg_surface_configure_handler(void* data, xdg_surface* surface, uint32_t serial) {
     auto* win = static_cast<Window*>(data);
@@ -79,7 +78,7 @@ void FrameContext::begin_rendering(VkClearColorValue clear_color, float clear_de
         .layerCount = 1,
         .colorAttachmentCount = 1,
         .pColorAttachments = &color_attachment,
-        .pDepthAttachment = &depth_attachment,
+        .pDepthAttachment = (depth_image_view != VK_NULL_HANDLE) ? &depth_attachment : nullptr,
     };
 
     vkCmdBeginRendering(cmd, &rendering_info);
@@ -117,7 +116,22 @@ Window::Window(WaylandContext& wl, VulkanContext& vk, WindowConfig config)
     init_drm_syncobj_timelines(wl, vk);
     choose_color_format(wl);
     create_dmabuf_buffers(wl, vk);
-    create_depth_buffer(vk);
+
+    // Initialize per-window GBuffer
+    m_gbuffer.init(vk, m_width, m_height);
+
+    // Add default depth attachment to GBuffer
+    m_depth_attachment_id = m_gbuffer.add_attachment({
+        .name = "window_depth_buffer",
+        .format = VK_FORMAT_D32_SFLOAT,
+        .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+    });
+
+    // Add any user-specified extra attachments
+    for (const auto& extra_att : m_config.extra_attachments) {
+        m_gbuffer.add_attachment(extra_att);
+    }
+
     init_frame_arena(vk);
     create_command_resources(vk);
 }
@@ -138,7 +152,6 @@ void Window::choose_color_format(WaylandContext& wl) {
     if (m_config.format_selector) {
         m_chosen_format = m_config.format_selector(available);
     } else {
-        // Default selector: pick standard B8G8R8A8_UNORM (ARGB8888 or XRGB8888)
         auto it = std::find_if(available.begin(), available.end(), [](const ColorFormat& cf) {
             return cf.vk_format == VK_FORMAT_B8G8R8A8_UNORM;
         });
@@ -334,60 +347,6 @@ void Window::create_dmabuf_buffers(WaylandContext& wl, VulkanContext& vk) {
     }
 }
 
-void Window::create_depth_buffer(VulkanContext& vk) {
-    VkImageCreateInfo image_info{
-        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-        .imageType = VK_IMAGE_TYPE_2D,
-        .format = DEPTH_FORMAT,
-        .extent = { m_width, m_height, 1 },
-        .mipLevels = 1,
-        .arrayLayers = 1,
-        .samples = VK_SAMPLE_COUNT_1_BIT,
-        .tiling = VK_IMAGE_TILING_OPTIMAL,
-        .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-    };
-
-    VmaAllocationCreateInfo alloc_info{
-        .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
-    };
-
-    if (vmaCreateImage(vk.get_allocator(), &image_info, &alloc_info, &m_depth.image, &m_depth.allocation, nullptr) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to allocate depth image via VMA for window: " + m_config.title);
-    }
-
-    VkImageViewCreateInfo view_info{
-        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-        .image = m_depth.image,
-        .viewType = VK_IMAGE_VIEW_TYPE_2D,
-        .format = DEPTH_FORMAT,
-        .subresourceRange = {
-            .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
-            .baseMipLevel = 0,
-            .levelCount = 1,
-            .baseArrayLayer = 0,
-            .layerCount = 1,
-        },
-    };
-
-    if (vkCreateImageView(vk.get_device(), &view_info, nullptr, &m_depth.view) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create depth image view for window: " + m_config.title);
-    }
-}
-
-void Window::cleanup_depth_buffer(VulkanContext& vk) {
-    if (m_depth.view != VK_NULL_HANDLE) {
-        vkDestroyImageView(vk.get_device(), m_depth.view, nullptr);
-        m_depth.view = VK_NULL_HANDLE;
-    }
-    if (m_depth.image != VK_NULL_HANDLE) {
-        vmaDestroyImage(vk.get_allocator(), m_depth.image, m_depth.allocation);
-        m_depth.image = VK_NULL_HANDLE;
-        m_depth.allocation = VK_NULL_HANDLE;
-    }
-}
-
 void Window::init_frame_arena(VulkanContext& vk) {
     m_frame_arena.init(
         vk.get_allocator(),
@@ -493,7 +452,7 @@ void Window::cleanup(VulkanContext& vk) {
         }
 
         m_frame_arena.cleanup(vk.get_allocator());
-        cleanup_depth_buffer(vk);
+        m_gbuffer.cleanup();
         cleanup_dmabuf_buffers(vk);
 
         destroy_drm_timeline(vk.get_drm_fd(), m_acquire_timeline);
@@ -540,10 +499,6 @@ void Window::handle_surface_configure() {
     m_configured = true;
 }
 
-void Window::close() {
-    handle_close();
-}
-
 void Window::handle_close() {
     if (m_config.on_close) {
         bool allow_close = m_config.on_close(*this);
@@ -556,13 +511,19 @@ void Window::handle_close() {
     std::println("[Codotaku] Window '{}' closed.", m_config.title);
 }
 
+void Window::close() {
+    handle_close();
+}
+
 void Window::recreate_buffers(VulkanContext& vk) {
     if (!m_wayland_ctx) return;
     vkDeviceWaitIdle(vk.get_device());
-    cleanup_depth_buffer(vk);
     cleanup_dmabuf_buffers(vk);
     create_dmabuf_buffers(*m_wayland_ctx, vk);
-    create_depth_buffer(vk);
+
+    // Automatically bulk resize the window's GBuffer attachments
+    m_gbuffer.resize_all(m_width, m_height);
+
     m_current_buffer_idx = 0;
 }
 
@@ -604,63 +565,55 @@ std::optional<FrameContext> Window::begin_frame(VulkanContext& vk) {
         .layerCount = 1,
     };
 
-    VkImageSubresourceRange depth_subresource_range{
-        .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
-        .baseMipLevel = 0,
-        .levelCount = 1,
-        .baseArrayLayer = 0,
-        .layerCount = 1,
+    // Synchronization 2: Transition Color attachment to COLOR_ATTACHMENT_OPTIMAL
+    VkImageMemoryBarrier2 barrier_color{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .srcStageMask = VK_PIPELINE_STAGE_2_NONE,
+        .srcAccessMask = VK_ACCESS_2_NONE,
+        .dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        .dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = buf.image,
+        .subresourceRange = color_subresource_range,
     };
 
-    // Synchronization 2: Transition Color and Depth attachments
-    VkImageMemoryBarrier2 barriers[2] = {
-        {
-            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-            .srcStageMask = VK_PIPELINE_STAGE_2_NONE,
-            .srcAccessMask = VK_ACCESS_2_NONE,
-            .dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-            .dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-            .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-            .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .image = buf.image,
-            .subresourceRange = color_subresource_range,
-        },
-        {
-            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-            .srcStageMask = VK_PIPELINE_STAGE_2_NONE,
-            .srcAccessMask = VK_ACCESS_2_NONE,
-            .dstStageMask = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-            .dstAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-            .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-            .newLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .image = m_depth.image,
-            .subresourceRange = depth_subresource_range,
-        }
-    };
-
-    VkDependencyInfo dep_pre_render{
+    VkDependencyInfo dep_color{
         .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-        .imageMemoryBarrierCount = 2,
-        .pImageMemoryBarriers = barriers,
+        .imageMemoryBarrierCount = 1,
+        .pImageMemoryBarriers = &barrier_color,
     };
+    vkCmdPipelineBarrier2(cmd, &dep_color);
 
-    vkCmdPipelineBarrier2(cmd, &dep_pre_render);
+    // Transition GBuffer Depth attachment to DEPTH_ATTACHMENT_OPTIMAL
+    if (m_gbuffer.has_attachment(m_depth_attachment_id)) {
+        m_gbuffer.transition(
+            cmd,
+            m_depth_attachment_id,
+            VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+            VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+            VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+    }
 
     float aspect = (m_height > 0) ? (static_cast<float>(m_width) / static_cast<float>(m_height)) : 1.0f;
+
+    VkImageView depth_view = m_gbuffer.has_attachment(m_depth_attachment_id)
+                                 ? m_gbuffer.get_view(m_depth_attachment_id)
+                                 : VK_NULL_HANDLE;
 
     return FrameContext{
         .cmd = cmd,
         .color_image_view = buf.view,
-        .depth_image_view = m_depth.view,
+        .depth_image_view = depth_view,
         .width = m_width,
         .height = m_height,
         .aspect_ratio = aspect,
         .buffer_index = m_current_buffer_idx,
         .frame_arena = m_frame_arena,
+        .gbuffer = m_gbuffer,
+        .depth_attachment_id = m_depth_attachment_id,
     };
 }
 

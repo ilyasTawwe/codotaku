@@ -2,6 +2,7 @@
 
 #include <functional>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -11,6 +12,7 @@
 #include <codotaku/shader/slang_compiler.hpp>
 #include <codotaku/vulkan/arena.hpp>
 #include <codotaku/vulkan/context.hpp>
+#include <codotaku/vulkan/gbuffer.hpp>
 #include <codotaku/vulkan/indirect.hpp>
 #include <codotaku/vulkan/pipeline.hpp>
 #include <codotaku/wayland/context.hpp>
@@ -28,8 +30,25 @@ public:
 
     Window* create_window(WindowConfig config);
 
-    MeshHandle upload_mesh(const std::vector<Vertex>& vertices, const std::vector<uint16_t>& indices);
+    template <typename VertexType, typename IndexType = uint16_t>
+    MeshHandle upload_mesh(std::span<const VertexType> vertices, std::span<const IndexType> indices) {
+        return upload_mesh_raw(
+            vertices.data(), sizeof(VertexType) * vertices.size(), static_cast<uint32_t>(vertices.size()),
+            indices.data(), sizeof(IndexType) * indices.size(), static_cast<uint32_t>(indices.size())
+        );
+    }
+
+    template <typename VertexType, typename IndexType = uint16_t>
+    MeshHandle upload_mesh(const std::vector<VertexType>& vertices, const std::vector<IndexType>& indices) {
+        return upload_mesh(std::span<const VertexType>(vertices), std::span<const IndexType>(indices));
+    }
+
+    MeshHandle upload_mesh_raw(
+        const void* vertex_data, size_t vertex_data_size, uint32_t vertex_count,
+        const void* index_data, size_t index_data_size, uint32_t index_count);
+
     IndirectDrawBatch upload_indirect_command(const IndirectDrawCommand& cmd);
+
     Pipeline create_pipeline(
         const char* slang_code,
         VkFormat color_format = VK_FORMAT_B8G8R8A8_UNORM,
@@ -61,7 +80,6 @@ private:
     std::vector<std::unique_ptr<Window>> m_windows;
 };
 
-// Convenience alias
 using Engine = Application;
 
 } // namespace codotaku
