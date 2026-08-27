@@ -15,6 +15,7 @@
 #include <codotaku/vulkan/gbuffer.hpp>
 #include <codotaku/vulkan/indirect.hpp>
 #include <codotaku/vulkan/pipeline.hpp>
+#include <codotaku/vulkan/uploader.hpp>
 #include <codotaku/wayland/context.hpp>
 #include <codotaku/wayland/window.hpp>
 
@@ -29,25 +30,6 @@ public:
     Application& operator=(const Application&) = delete;
 
     Window* create_window(WindowConfig config);
-
-    template <typename VertexType, typename IndexType = uint16_t>
-    MeshHandle upload_mesh(std::span<const VertexType> vertices, std::span<const IndexType> indices) {
-        return upload_mesh_raw(
-            vertices.data(), sizeof(VertexType) * vertices.size(), static_cast<uint32_t>(vertices.size()),
-            indices.data(), sizeof(IndexType) * indices.size(), static_cast<uint32_t>(indices.size())
-        );
-    }
-
-    template <typename VertexType, typename IndexType = uint16_t>
-    MeshHandle upload_mesh(const std::vector<VertexType>& vertices, const std::vector<IndexType>& indices) {
-        return upload_mesh(std::span<const VertexType>(vertices), std::span<const IndexType>(indices));
-    }
-
-    MeshHandle upload_mesh_raw(
-        const void* vertex_data, size_t vertex_data_size, uint32_t vertex_count,
-        const void* index_data, size_t index_data_size, uint32_t index_count);
-
-    IndirectDrawBatch upload_indirect_command(const IndirectDrawCommand& cmd);
 
     Pipeline create_pipeline(
         const char* slang_code,
@@ -66,7 +48,7 @@ public:
 
     WaylandContext& get_wayland() { return m_wayland; }
     VulkanContext& get_vulkan() { return m_vulkan; }
-    GpuBufferArena& get_geometry_arena() { return m_geometry_arena; }
+    SlangCompiler& get_slang() { return m_slang; }
     const std::vector<std::unique_ptr<Window>>& get_windows() const { return m_windows; }
 
 private:
@@ -76,7 +58,6 @@ private:
     VulkanContext m_vulkan;
     SlangCompiler m_slang;
 
-    GpuBufferArena m_geometry_arena;
     std::vector<std::unique_ptr<Window>> m_windows;
 };
 

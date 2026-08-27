@@ -133,6 +133,7 @@ add_library(codotaku STATIC
     src/vulkan/context.cpp
     src/vulkan/arena.cpp
     src/vulkan/sync.cpp
+    src/vulkan/uploader.cpp
     src/vulkan/texture.cpp
     src/vulkan/gbuffer.cpp
     src/vulkan/pipeline.cpp

@@ -1,10 +1,7 @@
 #pragma once
 
 #include <cstdint>
-#include <memory>
 #include <string>
-#include <vector>
-
 #include <volk.h>
 #include <vk_mem_alloc.h>
 
@@ -33,17 +30,20 @@ public:
     Texture(Texture&& other) noexcept;
     Texture& operator=(Texture&& other) noexcept;
 
-    void init_from_rgba8(
+    void init(
+        VkDevice device,
+        VmaAllocator allocator,
+        VkImage image,
+        VkImageView view,
+        VmaAllocation allocation,
+        VkSampler sampler,
+        const TextureDesc& desc);
+
+    static Texture create_uninitialized(
         VulkanContext& vk,
-        const uint8_t* pixel_data,
         uint32_t width,
         uint32_t height,
         const TextureDesc& desc = {});
-
-    // Procedural texture generators
-    static Texture create_checkerboard(VulkanContext& vk, uint32_t width = 256, uint32_t height = 256, uint32_t tile_size = 32);
-    static Texture create_solid_color(VulkanContext& vk, uint8_t r, uint8_t g, uint8_t b, uint8_t a = 255);
-    static Texture create_grid_pattern(VulkanContext& vk, uint32_t width = 256, uint32_t height = 256);
 
     void cleanup();
 
@@ -64,9 +64,6 @@ public:
     }
 
 private:
-    void create_image_and_upload(VulkanContext& vk, const uint8_t* pixel_data, VkDeviceSize data_size);
-    void create_sampler(VkDevice device);
-
     VkDevice m_device{VK_NULL_HANDLE};
     VmaAllocator m_allocator{VK_NULL_HANDLE};
     TextureDesc m_desc{};

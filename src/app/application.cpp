@@ -1,6 +1,5 @@
 #include <chrono>
 #include <csignal>
-#include <cstring>
 #include <iostream>
 #include <poll.h>
 #include <print>
@@ -17,8 +16,6 @@ void signal_handler(int) {
     g_interrupted.store(true);
 }
 
-constexpr VkDeviceSize GEOMETRY_ARENA_SIZE = 4 * 1024 * 1024; // 4 MB Static Geometry Arena
-
 } // namespace
 
 Application::Application(std::string app_name)
@@ -27,13 +24,6 @@ Application::Application(std::string app_name)
     std::signal(SIGTERM, signal_handler);
 
     std::println("[Codotaku] Initializing Engine '{}' (C++26)...", m_app_name);
-
-    m_geometry_arena.init(
-        m_vulkan.get_allocator(),
-        m_vulkan.get_device(),
-        GEOMETRY_ARENA_SIZE,
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
-        VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT);
 }
 
 Application::~Application() {
@@ -42,8 +32,6 @@ Application::~Application() {
         win->cleanup(m_vulkan);
     }
     m_windows.clear();
-
-    m_geometry_arena.cleanup(m_vulkan.get_allocator());
 }
 
 Window* Application::create_window(WindowConfig config) {
@@ -51,55 +39,6 @@ Window* Application::create_window(WindowConfig config) {
     Window* ptr = win.get();
     m_windows.push_back(std::move(win));
     return ptr;
-}
-
-MeshHandle Application::upload_mesh_raw(
-    const void* vertex_data, size_t vertex_data_size, uint32_t vertex_count,
-    const void* index_data, size_t index_data_size, uint32_t index_count) {
-    auto vb_sub = m_geometry_arena.suballocate(vertex_data_size, 64);
-    std::memcpy(
-        static_cast<uint8_t*>(m_geometry_arena.get_mapped_data()) + vb_sub.offset,
-        vertex_data,
-        vertex_data_size);
-
-    auto ib_sub = m_geometry_arena.suballocate(index_data_size, 64);
-    std::memcpy(
-        static_cast<uint8_t*>(m_geometry_arena.get_mapped_data()) + ib_sub.offset,
-        index_data,
-        index_data_size);
-
-    return MeshHandle{
-        .vertex_address = vb_sub.device_address,
-        .index_address = ib_sub.device_address,
-        .vertex_count = vertex_count,
-        .index_count = index_count,
-        .vertex_offset = vb_sub.offset,
-        .index_offset = ib_sub.offset,
-    };
-}
-
-IndirectDrawBatch Application::upload_indirect_command(const IndirectDrawCommand& cmd) {
-    VkDrawIndirectCommand vk_cmd{
-        .vertexCount = cmd.vertexCount,
-        .instanceCount = cmd.instanceCount,
-        .firstVertex = cmd.firstVertex,
-        .firstInstance = cmd.firstInstance,
-    };
-
-    VkDeviceSize cmd_size = sizeof(VkDrawIndirectCommand);
-    auto sub = m_geometry_arena.suballocate(cmd_size, 16);
-    std::memcpy(
-        static_cast<uint8_t*>(m_geometry_arena.get_mapped_data()) + sub.offset,
-        &vk_cmd,
-        cmd_size);
-
-    return IndirectDrawBatch{
-        .suballocation = sub,
-        .draw_count = 1,
-        .stride = static_cast<uint32_t>(cmd_size),
-        .offset = sub.offset,
-        .device_address = sub.device_address,
-    };
 }
 
 Pipeline Application::create_pipeline(

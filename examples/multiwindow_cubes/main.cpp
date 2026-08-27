@@ -60,7 +60,7 @@ const std::vector<uint16_t> CUBE_INDICES = {
     20, 21, 22,  22, 23, 20  // Left
 };
 
-// User/Application-defined Scene Data struct matching shader layout
+// User-defined Scene Data struct matching Slang shader layout
 struct CustomSceneData {
     glm::mat4 view_proj{1.0f};
     glm::mat4 view{1.0f};
@@ -160,42 +160,104 @@ float4 fsMain(VertexOutput input) : SV_Target {
 }
 )";
 
+std::vector<uint8_t> generate_checkerboard_pixels(uint32_t width = 256, uint32_t height = 256, uint32_t tile_size = 32) {
+    std::vector<uint8_t> pixels(width * height * 4);
+    for (uint32_t y = 0; y < height; ++y) {
+        for (uint32_t x = 0; x < width; ++x) {
+            bool check = ((x / tile_size) + (y / tile_size)) % 2 == 0;
+            size_t idx = (y * width + x) * 4;
+            uint8_t val = check ? 245 : 45;
+            pixels[idx + 0] = val;
+            pixels[idx + 1] = check ? val : 130;
+            pixels[idx + 2] = check ? val : 210;
+            pixels[idx + 3] = 255;
+        }
+    }
+    return pixels;
+}
+
+std::vector<uint8_t> generate_grid_pixels(uint32_t width = 256, uint32_t height = 256) {
+    std::vector<uint8_t> pixels(width * height * 4);
+    for (uint32_t y = 0; y < height; ++y) {
+        for (uint32_t x = 0; x < width; ++x) {
+            bool edge = (x % 32 == 0) || (y % 32 == 0) || (x == width - 1) || (y == height - 1);
+            size_t idx = (y * width + x) * 4;
+            if (edge) {
+                pixels[idx + 0] = 255;
+                pixels[idx + 1] = 255;
+                pixels[idx + 2] = 255;
+                pixels[idx + 3] = 255;
+            } else {
+                pixels[idx + 0] = static_cast<uint8_t>((x * 255) / width);
+                pixels[idx + 1] = static_cast<uint8_t>((y * 255) / height);
+                pixels[idx + 2] = 160;
+                pixels[idx + 3] = 255;
+            }
+        }
+    }
+    return pixels;
+}
+
 int main() {
     try {
-        codotaku::Application app("Codotaku Engine Demo");
+        codotaku::Application app("Codotaku Engine Demo (Asynchronous Batch Uploader)");
+        auto& vk = app.get_vulkan();
 
-        // 1. Generic Mesh upload to Static Geometry Arena
-        auto mesh = app.upload_mesh(CUBE_VERTICES, CUBE_INDICES);
+        // 1. Create Uploader immediately at startup
+        codotaku::Uploader uploader(vk);
 
-        // 2. Upload Indirect Draw Command to Static Arena
-        auto indirect_batch = app.upload_indirect_command({
-            .vertexCount = mesh.index_count,
+        // 2. Allocate Static Geometry Arena (4 MB)
+        codotaku::GpuBufferArena geometry_arena;
+        geometry_arena.init(
+            vk.get_allocator(),
+            vk.get_device(),
+            4 * 1024 * 1024,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
+            VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+
+        // 3. Enqueue geometry uploads into Geometry Arena (returns BDA suballocation immediately)
+        auto vb_sub = uploader.upload_to_arena(geometry_arena, std::span(CUBE_VERTICES));
+        auto ib_sub = uploader.upload_to_arena(geometry_arena, std::span(CUBE_INDICES));
+
+        // 4. Enqueue indirect draw command upload into Geometry Arena
+        VkDrawIndirectCommand indirect_cmd{
+            .vertexCount = static_cast<uint32_t>(CUBE_INDICES.size()),
             .instanceCount = 1,
             .firstVertex = 0,
             .firstInstance = 0,
-        });
+        };
+        auto cmd_sub = uploader.upload_to_arena(geometry_arena, indirect_cmd);
 
-        // 3. Compile Slang Shader & Create Dynamic Rendering Pipeline
+        // 5. Enqueue texture uploads (allocates GPU textures and returns handles immediately)
+        auto checkerboard_pixels = generate_checkerboard_pixels();
+        auto grid_pixels = generate_grid_pixels();
+
+        auto checkerboard_tex = uploader.upload_texture(
+            256, 256, VK_FORMAT_R8G8B8A8_UNORM, checkerboard_pixels, { .name = "checkerboard" });
+
+        auto grid_tex = uploader.upload_texture(
+            256, 256, VK_FORMAT_R8G8B8A8_UNORM, grid_pixels, { .name = "grid_pattern" });
+
+        // 6. Submit all DMA staging copies to GPU in background!
+        uploader.upload();
+
+        // ---------------------------------------------------------------------
+        // PARALLEL CPU WORK (Overlapping while GPU DMA transfer executes):
+        // Compile Slang shaders, create pipeline, descriptor sets, and windows
+        // ---------------------------------------------------------------------
         auto pipeline = app.create_pipeline(SHADER_SLANG_CODE);
-
-        // 4. Create Procedural Textures & Descriptor Sets
-        auto checkerboard_tex = codotaku::Texture::create_checkerboard(app.get_vulkan(), 256, 256, 32);
-        auto grid_tex = codotaku::Texture::create_grid_pattern(app.get_vulkan(), 256, 256);
 
         VkDescriptorSet checkerboard_desc_set = pipeline.create_texture_descriptor_set(checkerboard_tex, 0, 0);
         VkDescriptorSet grid_desc_set = pipeline.create_texture_descriptor_set(grid_tex, 0, 0);
 
-        // 5. Create 3D Camera
         codotaku::Camera camera({0.0f, 1.4f, 3.2f}, {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, 45.0f);
 
-        // Common depth attachment specification defined by user code
         codotaku::AttachmentDesc depth_desc = {
             .name = "depth_buffer",
             .format = VK_FORMAT_D32_SFLOAT,
             .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
         };
 
-        // 6. Spawn Windows (Configuring user-defined attachments for each window's GBuffer)
         app.set_close_policy(codotaku::WindowClosePolicy::QuitOnLastWindowClose);
 
         app.create_window({
@@ -220,7 +282,6 @@ int main() {
             .height = 600,
             .buffer_count = 2,
             .present_mode = codotaku::PresentMode::Immediate,
-            // User populates depth + an extra HDR render target attachment!
             .attachments = {
                 depth_desc,
                 {
@@ -239,14 +300,17 @@ int main() {
             .present_mode = codotaku::PresentMode::Fifo,
             .attachments = { depth_desc },
             .on_close = [](codotaku::Window& win) {
-                std::println("[Custom Hook] Window '{}' intercepting close event.", win.get_title());
+                std::println("[Custom Hook] Window '{}' close requested, accepting.", win.get_title());
                 return true;
             },
         });
 
+        // 7. Wait on upload fence right before starting render loop (zero GPU wait stall!)
+        uploader.wait();
+
         auto start_time = std::chrono::steady_clock::now();
 
-        // 7. Transparent Render Loop (User controls GBuffer attachments, recording & draw calls!)
+        // 8. Transparent Render Loop (User controls GBuffer attachments, recording & draw calls!)
         int ret = app.run([&](codotaku::Window& window, codotaku::FrameContext& frame) {
             auto now = std::chrono::steady_clock::now();
             float time_sec = std::chrono::duration<float>(now - start_time).count();
@@ -277,11 +341,11 @@ int main() {
             scene->tint = (window.get_title().find("Grid") != std::string::npos)
                               ? glm::vec3(1.0f, 0.8f, 0.4f)
                               : glm::vec3(1.0f, 1.0f, 1.0f);
-            scene->vertexBufferAddress = mesh.vertex_address;
-            scene->indexBufferAddress = mesh.index_address;
-            scene->indirectCommandsAddress = indirect_batch.device_address;
+            scene->vertexBufferAddress = vb_sub.device_address;
+            scene->indexBufferAddress = ib_sub.device_address;
+            scene->indirectCommandsAddress = cmd_sub.device_address;
 
-            // Transition user's depth attachment in the window's GBuffer (ID 0)
+            // Transition depth attachment in the window's GBuffer (ID 0)
             frame.gbuffer.transition(
                 frame.cmd,
                 0, // depth attachment ID
@@ -290,7 +354,7 @@ int main() {
                 VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
 
             // Direct Vulkan Dynamic Rendering pass (using window color DMA-BUF + GBuffer depth!)
-            frame.begin_rendering_with_attachment({.float32 = {0.05f, 0.05f, 0.08f, 1.0f}}, 0 /* depth_attachment_id */, 1.0f);
+            frame.begin_rendering_with_attachment({.float32 = {0.05f, 0.05f, 0.08f, 1.0f}}, 0, 1.0f);
             frame.set_viewport_and_scissor();
 
             vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.get_pipeline());
@@ -320,16 +384,17 @@ int main() {
             // GPU-Driven Indirect Draw!
             vkCmdDrawIndirect(
                 frame.cmd,
-                app.get_geometry_arena().get_buffer(),
-                indirect_batch.offset,
-                indirect_batch.draw_count,
-                indirect_batch.stride);
+                geometry_arena.get_buffer(),
+                cmd_sub.offset,
+                1,
+                sizeof(VkDrawIndirectCommand));
 
             frame.end_rendering();
         });
 
         checkerboard_tex.cleanup();
         grid_tex.cleanup();
+        geometry_arena.cleanup(vk.get_allocator());
         pipeline.cleanup();
         return ret;
 

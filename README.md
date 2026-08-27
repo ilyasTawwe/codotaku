@@ -24,6 +24,11 @@ Inspired by modern Linux presentation paradigms (such as NVIDIA's `egl-wayland2`
   - **Dynamic Rendering** (`vkCmdBeginRendering` / `vkCmdEndRendering`) — zero legacy render passes or framebuffers.
   - **Synchronization 2** (`vkCmdPipelineBarrier2`, `VkDependencyInfo`, `VkImageMemoryBarrier2`).
   - **Volk & VMA**: Volk meta-loader and Vulkan Memory Allocator integrated with Buffer Device Address support.
+- **Asynchronous Batch `Uploader` Primitive**:
+  - Batches host-to-device transfers for meshes, buffers, and textures in a single staging buffer with automatic alignment calculation.
+  - Returns GPU resource handles and 64-bit BDA addresses **immediately** upon registration.
+  - Submits GPU DMA copies in the background (`uploader.upload()`), enabling **CPU/GPU parallelism** during startup (overlap Slang compilation, pipeline creation, and window setup while GPU transfers execute).
+  - Explicit non-blocking synchronization (`uploader.wait()`, `uploader.is_ready()`).
 - **GPU-Driven Indirect Drawing & Programmable Vertex Pulling (BDA)**:
   - Supports `vkCmdDrawIndirect` and `vkCmdDrawIndexedIndirect` from GPU buffers.
   - 100% bindless vertex and index fetching via 64-bit GPU pointers (`(Vertex*)pc.vertexBufferAddress`).
@@ -33,7 +38,7 @@ Inspired by modern Linux presentation paradigms (such as NVIDIA's `egl-wayland2`
   - **Dynamic Frame Arena**: 64 KB host-mapped ring buffer for per-frame scene/transform data.
   - Compact **8-byte push constants** (`uint64_t sceneDataAddress`).
 - **Texture Management & Slang Texture Sampling**:
-  - `codotaku::Texture`: Loads RGBA8 pixel buffers or procedural patterns (checkerboard, grid) via VMA staging buffers with Synchronization 2 uploads.
+  - `codotaku::Texture`: Pure GPU texture resource (`VkImage`, `VkImageView`, `VkSampler`) populated asynchronously via `Uploader`.
   - Full anisotropic sampler creation and automatic Slang descriptor set reflection (`[[vk::binding(0, 0)]] Sampler2D`).
 - **Window-Managed GBuffer with Automatic Bulk Resizing**:
   - Each `Window` owns and manages a `GBuffer` instance for its render targets.
@@ -41,11 +46,10 @@ Inspired by modern Linux presentation paradigms (such as NVIDIA's `egl-wayland2`
   - On window resize events, all attachments in the window's GBuffer are automatically recreated in bulk matching the new resolution.
   - Retrieve raw Vulkan handles at any time via stable integer handle IDs.
 - **Generic Mesh & Buffer Uploading**:
-  - Templated mesh uploading (`app.upload_mesh(vertices, indices)`) accepting any user-defined vertex and index format.
+  - Templated mesh uploading (`uploader.upload_to_arena(arena, span)`) accepting any user-defined vertex and index format.
   - The library imposes zero hardcoded vertex or scene struct layout restrictions.
 - **Built-in 3D Camera Abstraction**:
   - `codotaku::Camera`: Full perspective, view matrix (`lookAt`), orbit, zoom, and Vulkan NDC clip space alignment.
-  - `codotaku::MeshHandle`: 64-bit BDA address handles for vertex and index buffers.
 - **Configurable Presentation & Windowing Options**:
   - Configurable double/triple buffering (`buffer_count`).
   - VSync control (`PresentMode::Fifo` vs `PresentMode::Immediate`).
@@ -80,7 +84,8 @@ codotaku/
 │       │   ├── context.hpp                # Vulkan 1.4 context, Volk, VMA, DRM node
 │       │   ├── arena.hpp                  # GpuBufferArena (VmaVirtualBlock suballocations)
 │       │   ├── sync.hpp                   # DRM syncobj timeline explicit synchronization
-│       │   ├── texture.hpp                # 2D Texture & procedural texture generators
+│       │   ├── uploader.hpp               # Asynchronous batch GPU uploader
+│       │   ├── texture.hpp                # 2D Texture primitive
 │       │   ├── gbuffer.hpp                # GBuffer & dynamic render target pool
 │       │   ├── indirect.hpp               # Indirect draw command batch helper
 │       │   └── pipeline.hpp               # Dynamic rendering BDA graphics pipeline
@@ -90,7 +95,7 @@ codotaku/
 │           └── application.hpp            # Application framework & non-blocking event loop
 ├── src/
 │   ├── wayland/ (context.cpp, window.cpp)
-│   ├── vulkan/  (context.cpp, arena.cpp, sync.cpp, texture.cpp, gbuffer.cpp, pipeline.cpp)
+│   ├── vulkan/  (context.cpp, arena.cpp, sync.cpp, uploader.cpp, texture.cpp, gbuffer.cpp, pipeline.cpp)
 │   ├── shader/  (slang_compiler.cpp)
 │   └── app/     (application.cpp)
 └── examples/
@@ -176,52 +181,71 @@ struct CustomSceneData {
 int main() {
     try {
         codotaku::Application app("Codotaku Engine Demo");
+        auto& vk = app.get_vulkan();
 
-        // Upload Mesh to the Static Geometry Arena (Generic templated upload)
-        auto mesh = app.upload_mesh(CUBE_VERTICES, CUBE_INDICES);
+        // 1. Create Uploader immediately
+        codotaku::Uploader uploader(vk);
 
-        // Upload Indirect Draw Command to Static Arena
-        auto indirect_batch = app.upload_indirect_command({
-            .vertexCount = mesh.index_count,
-        });
+        // 2. Allocate Static Geometry Arena (4 MB)
+        codotaku::GpuBufferArena geometry_arena;
+        geometry_arena.init(
+            vk.get_allocator(),
+            vk.get_device(),
+            4 * 1024 * 1024,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
+            VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
 
-        // Compile Slang Shader & Create Dynamic Rendering Pipeline
+        // 3. Enqueue geometry uploads into Geometry Arena (returns BDA suballocation immediately)
+        auto vb_sub = uploader.upload_to_arena(geometry_arena, std::span(CUBE_VERTICES));
+        auto ib_sub = uploader.upload_to_arena(geometry_arena, std::span(CUBE_INDICES));
+
+        // 4. Enqueue indirect draw command upload into Geometry Arena
+        VkDrawIndirectCommand indirect_cmd{
+            .vertexCount = static_cast<uint32_t>(CUBE_INDICES.size()),
+            .instanceCount = 1,
+            .firstVertex = 0,
+            .firstInstance = 0,
+        };
+        auto cmd_sub = uploader.upload_to_arena(geometry_arena, indirect_cmd);
+
+        // 5. Enqueue texture uploads (returns GPU Texture handles immediately)
+        auto checkerboard_pixels = generate_checkerboard_pixels();
+        auto texture = uploader.upload_texture(
+            256, 256, VK_FORMAT_R8G8B8A8_UNORM, checkerboard_pixels, { .name = "checkerboard" });
+
+        // 6. Submit all DMA staging copies to GPU in background!
+        uploader.upload();
+
+        // ---------------------------------------------------------------------
+        // PARALLEL CPU WORK (Overlapping while GPU DMA transfer executes):
+        // Compile Slang shaders, create pipeline, descriptor sets, and windows
+        // ---------------------------------------------------------------------
         auto pipeline = app.create_pipeline(SHADER_SLANG_CODE);
-
-        // Create Textures & Descriptor Sets
-        auto texture = codotaku::Texture::create_checkerboard(app.get_vulkan(), 256, 256, 32);
         VkDescriptorSet tex_desc_set = pipeline.create_texture_descriptor_set(texture, 0, 0);
 
-        // Create 3D Camera
         codotaku::Camera camera({0.0f, 1.4f, 3.2f}, {0.0f, 0.0f, 0.0f});
 
-        // Spawn Windows (Each window automatically owns an integrated GBuffer!)
+        codotaku::AttachmentDesc depth_desc = {
+            .name = "depth_buffer",
+            .format = VK_FORMAT_D32_SFLOAT,
+            .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        };
+
         app.create_window({
             .title = "Window 1 (Triple Buffer, VSync ON)",
             .width = 800, .height = 600,
             .buffer_count = 3,
             .present_mode = codotaku::PresentMode::Fifo,
+            .attachments = { depth_desc },
             .is_primary = true,
         });
 
-        app.create_window({
-            .title = "Window 2 (Double Buffer, Immediate)",
-            .width = 600, .height = 600,
-            .buffer_count = 2,
-            .present_mode = codotaku::PresentMode::Immediate,
-            // Configure extra GBuffer attachments if needed
-            .extra_attachments = {
-                {
-                    .name = "hdr_albedo",
-                    .format = VK_FORMAT_R16G16B16A16_SFLOAT,
-                    .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-                }
-            }
-        });
+        // 7. Wait on upload fence right before starting render loop (zero GPU wait stall!)
+        uploader.wait();
 
         auto start_time = std::chrono::steady_clock::now();
 
-        // Transparent, Non-intrusive Render Loop (User controls command recording & submission!)
+        // 8. Transparent Render Loop (User controls command recording & submission!)
         return app.run([&](codotaku::Window& window, codotaku::FrameContext& frame) {
             float time_sec = std::chrono::duration<float>(std::chrono::steady_clock::now() - start_time).count();
 
@@ -237,11 +261,11 @@ int main() {
             scene->view = camera.get_view_matrix();
             scene->proj = camera.get_projection_matrix();
             scene->time = time_sec;
-            scene->vertexBufferAddress = mesh.vertex_address;
-            scene->indexBufferAddress = mesh.index_address;
+            scene->vertexBufferAddress = vb_sub.device_address;
+            scene->indexBufferAddress = ib_sub.device_address;
 
             // Direct Vulkan Dynamic Rendering pass!
-            frame.begin_rendering({.float32 = {0.05f, 0.05f, 0.08f, 1.0f}}, 1.0f);
+            frame.begin_rendering_with_attachment({.float32 = {0.05f, 0.05f, 0.08f, 1.0f}}, 0, 1.0f);
             frame.set_viewport_and_scissor();
 
             vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.get_pipeline());
@@ -255,8 +279,8 @@ int main() {
                                0, sizeof(uint64_t), &scene_addr);
 
             // GPU-Driven Indirect Draw!
-            vkCmdDrawIndirect(frame.cmd, app.get_geometry_arena().get_buffer(),
-                              indirect_batch.offset, indirect_batch.draw_count, indirect_batch.stride);
+            vkCmdDrawIndirect(frame.cmd, geometry_arena.get_buffer(),
+                              cmd_sub.offset, 1, sizeof(VkDrawIndirectCommand));
 
             frame.end_rendering();
         });
