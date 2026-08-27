@@ -69,6 +69,7 @@ struct DrmTimeline {
 
 struct DmaBufBuffer {
     VkImage image{VK_NULL_HANDLE};
+    VkImageView view{VK_NULL_HANDLE};
     VkDeviceMemory memory{VK_NULL_HANDLE};
     int dmabuf_fd{-1};
     wl_buffer* wbuffer{nullptr};
@@ -383,8 +384,15 @@ void create_logical_device(VulkanState& vk) {
 
     VkPhysicalDeviceFeatures features{};
 
+    VkPhysicalDeviceVulkan13Features vulkan13_features{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+        .synchronization2 = VK_TRUE,
+        .dynamicRendering = VK_TRUE,
+    };
+
     VkDeviceCreateInfo device_create_info{
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+        .pNext = &vulkan13_features,
         .queueCreateInfoCount = 1,
         .pQueueCreateInfos = &queue_create_info,
         .enabledExtensionCount = static_cast<uint32_t>(device_extensions.size()),
@@ -593,6 +601,30 @@ void create_dmabuf_buffers(WaylandState& wl, VulkanState& vk) {
             throw std::runtime_error("Failed to create wl_buffer via zwp_linux_dmabuf_v1_create_immed");
         }
 
+        VkImageViewCreateInfo view_info{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .image = buf.image,
+            .viewType = VK_IMAGE_VIEW_TYPE_2D,
+            .format = VK_FORMAT_B8G8R8A8_UNORM,
+            .components = {
+                .r = VK_COMPONENT_SWIZZLE_IDENTITY,
+                .g = VK_COMPONENT_SWIZZLE_IDENTITY,
+                .b = VK_COMPONENT_SWIZZLE_IDENTITY,
+                .a = VK_COMPONENT_SWIZZLE_IDENTITY,
+            },
+            .subresourceRange = {
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        };
+
+        if (vkCreateImageView(vk.device, &view_info, nullptr, &buf.view) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create image view for DMA-BUF buffer");
+        }
+
         buf.last_release_point = 0;
     }
 
@@ -604,6 +636,10 @@ void cleanup_dmabuf_buffers(VulkanState& vk) {
         if (buf.wbuffer) {
             wl_buffer_destroy(buf.wbuffer);
             buf.wbuffer = nullptr;
+        }
+        if (buf.view != VK_NULL_HANDLE) {
+            vkDestroyImageView(vk.device, buf.view, nullptr);
+            buf.view = VK_NULL_HANDLE;
         }
         if (buf.dmabuf_fd >= 0) {
             close(buf.dmabuf_fd);
@@ -746,40 +782,64 @@ void render_frame(WaylandState& wl, VulkanState& vk, std::chrono::steady_clock::
         .layerCount = 1,
     };
 
-    VkImageMemoryBarrier barrier_to_transfer{
-        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-        .srcAccessMask = 0,
-        .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+    // Synchronization 2: Transition from UNDEFINED to COLOR_ATTACHMENT_OPTIMAL
+    VkImageMemoryBarrier2 barrier_to_attachment{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .srcStageMask = VK_PIPELINE_STAGE_2_NONE,
+        .srcAccessMask = VK_ACCESS_2_NONE,
+        .dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        .dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
         .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-        .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .image = buf.image,
         .subresourceRange = subresource_range,
     };
 
-    vkCmdPipelineBarrier(
-        cmd,
-        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-        VK_PIPELINE_STAGE_TRANSFER_BIT,
-        0,
-        0, nullptr,
-        0, nullptr,
-        1, &barrier_to_transfer);
+    VkDependencyInfo dep_to_attachment{
+        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .imageMemoryBarrierCount = 1,
+        .pImageMemoryBarriers = &barrier_to_attachment,
+    };
 
-    vkCmdClearColorImage(
-        cmd,
-        buf.image,
-        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        &clear_color,
-        1,
-        &subresource_range);
+    vkCmdPipelineBarrier2(cmd, &dep_to_attachment);
 
-    VkImageMemoryBarrier barrier_to_general{
-        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
-        .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT,
-        .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+    // Dynamic Rendering: vkCmdBeginRendering / vkCmdEndRendering with color attachment
+    VkRenderingAttachmentInfo color_attachment{
+        .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        .imageView = buf.view,
+        .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+        .clearValue = {
+            .color = clear_color,
+        },
+    };
+
+    VkRenderingInfo rendering_info{
+        .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+        .renderArea = {
+            .offset = {0, 0},
+            .extent = {wl.width, wl.height},
+        },
+        .layerCount = 1,
+        .colorAttachmentCount = 1,
+        .pColorAttachments = &color_attachment,
+    };
+
+    vkCmdBeginRendering(cmd, &rendering_info);
+    // Dynamic rendering render pass is active
+    vkCmdEndRendering(cmd);
+
+    // Synchronization 2: Transition from COLOR_ATTACHMENT_OPTIMAL to GENERAL
+    VkImageMemoryBarrier2 barrier_to_general{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        .srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+        .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         .newLayout = VK_IMAGE_LAYOUT_GENERAL,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
@@ -787,14 +847,13 @@ void render_frame(WaylandState& wl, VulkanState& vk, std::chrono::steady_clock::
         .subresourceRange = subresource_range,
     };
 
-    vkCmdPipelineBarrier(
-        cmd,
-        VK_PIPELINE_STAGE_TRANSFER_BIT,
-        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-        0,
-        0, nullptr,
-        0, nullptr,
-        1, &barrier_to_general);
+    VkDependencyInfo dep_to_general{
+        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .imageMemoryBarrierCount = 1,
+        .pImageMemoryBarriers = &barrier_to_general,
+    };
+
+    vkCmdPipelineBarrier2(cmd, &dep_to_general);
 
     vkEndCommandBuffer(cmd);
 
