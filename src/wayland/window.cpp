@@ -346,6 +346,38 @@ void Window::create_dmabuf_buffers(WaylandContext& wl, VulkanContext& vk) {
 
         buf.last_release_point = 0;
     }
+
+    // Initialize all DMA-BUF images to VK_IMAGE_LAYOUT_GENERAL once upon creation
+    vk.execute_single_time_commands([&](VkCommandBuffer cmd) {
+        std::vector<VkImageMemoryBarrier2> init_barriers;
+        for (const auto& buf : m_buffers) {
+            init_barriers.push_back({
+                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                .srcStageMask = VK_PIPELINE_STAGE_2_NONE,
+                .srcAccessMask = VK_ACCESS_2_NONE,
+                .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image = buf.image,
+                .subresourceRange = {
+                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                    .baseMipLevel = 0,
+                    .levelCount = 1,
+                    .baseArrayLayer = 0,
+                    .layerCount = 1,
+                },
+            });
+        }
+        VkDependencyInfo dep_info{
+            .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+            .imageMemoryBarrierCount = static_cast<uint32_t>(init_barriers.size()),
+            .pImageMemoryBarriers = init_barriers.data(),
+        };
+        vkCmdPipelineBarrier2(cmd, &dep_info);
+    });
 }
 
 void Window::init_frame_arena(VulkanContext& vk) {
@@ -558,36 +590,6 @@ std::optional<FrameContext> Window::begin_frame(VulkanContext& vk) {
     };
     vkBeginCommandBuffer(cmd, &begin_info);
 
-    VkImageSubresourceRange color_subresource_range{
-        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-        .baseMipLevel = 0,
-        .levelCount = 1,
-        .baseArrayLayer = 0,
-        .layerCount = 1,
-    };
-
-    // Synchronization 2: Memory barrier for unified GENERAL image layout
-    VkImageMemoryBarrier2 barrier_color{
-        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-        .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-        .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT,
-        .dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-        .dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-        .oldLayout = (buf.last_release_point == 0) ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_GENERAL,
-        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
-        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .image = buf.image,
-        .subresourceRange = color_subresource_range,
-    };
-
-    VkDependencyInfo dep_color{
-        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-        .imageMemoryBarrierCount = 1,
-        .pImageMemoryBarriers = &barrier_color,
-    };
-    vkCmdPipelineBarrier2(cmd, &dep_color);
-
     float aspect = (m_height > 0) ? (static_cast<float>(m_width) / static_cast<float>(m_height)) : 1.0f;
 
     return FrameContext{
@@ -605,33 +607,19 @@ std::optional<FrameContext> Window::begin_frame(VulkanContext& vk) {
 void Window::submit_and_present(VulkanContext& vk, const FrameContext& frame) {
     auto& buf = m_buffers[m_current_buffer_idx];
 
-    VkImageSubresourceRange color_subresource_range{
-        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-        .baseMipLevel = 0,
-        .levelCount = 1,
-        .baseArrayLayer = 0,
-        .layerCount = 1,
-    };
-
-    // Synchronization 2: Memory barrier ensuring rendering writes are flushed before Wayland scanout
-    VkImageMemoryBarrier2 barrier_to_general{
-        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+    // Synchronization 2: Coalesced memory barrier ensuring rendering writes are flushed before Wayland scanout
+    VkMemoryBarrier2 scanout_barrier{
+        .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
         .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
         .srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
         .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
         .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT,
-        .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
-        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
-        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .image = buf.image,
-        .subresourceRange = color_subresource_range,
     };
 
     VkDependencyInfo dep_to_general{
         .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-        .imageMemoryBarrierCount = 1,
-        .pImageMemoryBarriers = &barrier_to_general,
+        .memoryBarrierCount = 1,
+        .pMemoryBarriers = &scanout_barrier,
     };
 
     vkCmdPipelineBarrier2(frame.cmd, &dep_to_general);

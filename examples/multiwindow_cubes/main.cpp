@@ -313,40 +313,19 @@ int main() {
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compute_pipeline.get_layout(), 0, 1, &grid_storage_set, 0, nullptr);
             vkCmdDispatch(cmd, 256 / 16, 256 / 16, 1);
 
-            // Transition both images: GENERAL -> SHADER_READ_ONLY_OPTIMAL for fragment sampling
-            VkImageMemoryBarrier2 post_barriers[2] = {
-                {
-                    .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-                    .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                    .srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                    .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-                    .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
-                    .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
-                    .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                    .image = checkerboard_tex.get_image(),
-                    .subresourceRange = range,
-                },
-                {
-                    .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-                    .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                    .srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                    .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-                    .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
-                    .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
-                    .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                    .image = grid_tex.get_image(),
-                    .subresourceRange = range,
-                }
+            // Coalesced memory barrier: Ensures compute storage image writes are visible to fragment shader sampling
+            VkMemoryBarrier2 compute_to_graphics_barrier{
+                .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+                .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                .srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
             };
 
             VkDependencyInfo post_dep{
                 .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-                .imageMemoryBarrierCount = 2,
-                .pImageMemoryBarriers = post_barriers,
+                .memoryBarrierCount = 1,
+                .pMemoryBarriers = &compute_to_graphics_barrier,
             };
             vkCmdPipelineBarrier2(cmd, &post_dep);
         });
@@ -416,7 +395,7 @@ int main() {
 
         auto start_time = std::chrono::steady_clock::now();
 
-        // Transparent Render Loop
+        // Transparent Render Loop (Unified GENERAL layout - zero per-frame layout transitions!)
         int ret = app.run([&](codotaku::Window& window, codotaku::FrameContext& frame) {
             auto now = std::chrono::steady_clock::now();
             float time_sec = std::chrono::duration<float>(now - start_time).count();
@@ -451,16 +430,9 @@ int main() {
             scene->indexBufferAddress = ib_sub.device_address;
             scene->indirectCommandsAddress = cmd_sub.device_address;
 
-            // Transition depth attachment in the window's GBuffer (ID 0) to GENERAL layout
-            frame.gbuffer.transition(
-                frame.cmd,
-                0, // depth attachment ID
-                VK_IMAGE_LAYOUT_GENERAL,
-                VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-                VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
-
-            // Direct Vulkan Dynamic Rendering pass (operating in unified GENERAL layout!)
+            // Direct Vulkan Dynamic Rendering pass (operating uniformly in GENERAL layout)
             frame.begin_rendering_with_attachment({.float32 = {0.05f, 0.05f, 0.08f, 1.0f}}, 0, 1.0f);
+            frame.set_viewport_and_scissor();
             frame.set_viewport_and_scissor();
 
             vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, graphics_pipeline.get_pipeline());

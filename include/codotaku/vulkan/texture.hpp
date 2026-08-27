@@ -56,11 +56,11 @@ public:
     uint32_t get_height() const { return m_desc.height; }
     const TextureDesc& get_desc() const { return m_desc; }
 
-    VkDescriptorImageInfo get_descriptor_image_info() const {
+    VkDescriptorImageInfo get_descriptor_image_info(VkImageLayout layout = VK_IMAGE_LAYOUT_GENERAL) const {
         return VkDescriptorImageInfo{
             .sampler = m_sampler,
             .imageView = m_view,
-            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            .imageLayout = layout,
         };
     }
 

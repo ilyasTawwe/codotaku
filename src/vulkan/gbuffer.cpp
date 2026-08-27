@@ -67,6 +67,7 @@ GBuffer& GBuffer::operator=(GBuffer&& other) noexcept {
 
 void GBuffer::init(VulkanContext& vk, uint32_t default_width, uint32_t default_height) {
     cleanup();
+    m_vk = &vk;
     m_device = vk.get_device();
     m_allocator = vk.get_allocator();
     m_default_width = default_width;
@@ -87,6 +88,7 @@ void GBuffer::cleanup() {
     m_active_count = 0;
     m_device = VK_NULL_HANDLE;
     m_allocator = VK_NULL_HANDLE;
+    m_vk = nullptr;
 }
 
 uint32_t GBuffer::add_attachment(const AttachmentDesc& desc) {
@@ -309,7 +311,38 @@ void GBuffer::allocate_attachment_resources(Attachment& att) {
         throw std::runtime_error("Failed to create GBuffer image view for attachment: " + att.name);
     }
 
-    att.current_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (m_vk) {
+        m_vk->execute_single_time_commands([&](VkCommandBuffer cmd) {
+            VkImageMemoryBarrier2 init_barrier{
+                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                .srcStageMask = VK_PIPELINE_STAGE_2_NONE,
+                .srcAccessMask = VK_ACCESS_2_NONE,
+                .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image = att.image,
+                .subresourceRange = {
+                    .aspectMask = att.aspect_mask,
+                    .baseMipLevel = 0,
+                    .levelCount = 1,
+                    .baseArrayLayer = 0,
+                    .layerCount = 1,
+                },
+            };
+
+            VkDependencyInfo dep{
+                .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                .imageMemoryBarrierCount = 1,
+                .pImageMemoryBarriers = &init_barrier,
+            };
+            vkCmdPipelineBarrier2(cmd, &dep);
+        });
+    }
+
+    att.current_layout = VK_IMAGE_LAYOUT_GENERAL;
 }
 
 void GBuffer::free_attachment_resources(Attachment& att) {

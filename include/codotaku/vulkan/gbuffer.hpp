@@ -79,6 +79,7 @@ private:
 
     VkDevice m_device{VK_NULL_HANDLE};
     VmaAllocator m_allocator{VK_NULL_HANDLE};
+    VulkanContext* m_vk{nullptr};
     uint32_t m_default_width{800};
     uint32_t m_default_height{600};
 
