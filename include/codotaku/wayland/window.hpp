@@ -72,7 +72,8 @@ public:
     const std::string& get_title() const { return m_config.title; }
     const ColorFormat& get_color_format() const { return m_chosen_format; }
 
-    void handle_configure(uint32_t width, uint32_t height);
+    void handle_toplevel_configure(int32_t width, int32_t height);
+    void handle_surface_configure();
     void handle_close();
 
     std::optional<FrameContext> begin_frame(VulkanContext& vk);
@@ -87,12 +88,15 @@ private:
     void create_depth_buffer(VulkanContext& vk);
     void cleanup_depth_buffer(VulkanContext& vk);
     void init_frame_arena(VulkanContext& vk);
-    void recreate_buffers(WaylandContext& wl, VulkanContext& vk);
+    void recreate_buffers(VulkanContext& vk);
     void create_command_resources(VulkanContext& vk);
 
+    WaylandContext* m_wayland_ctx{nullptr};
     WindowConfig m_config;
     uint32_t m_width{800};
     uint32_t m_height{600};
+    uint32_t m_pending_width{0};
+    uint32_t m_pending_height{0};
     ColorFormat m_chosen_format{};
 
     bool m_configured{false};

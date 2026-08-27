@@ -17,7 +17,7 @@ constexpr VkFormat DEPTH_FORMAT = VK_FORMAT_D32_SFLOAT;
 void xdg_surface_configure_handler(void* data, xdg_surface* surface, uint32_t serial) {
     auto* win = static_cast<Window*>(data);
     xdg_surface_ack_configure(surface, serial);
-    win->handle_configure(0, 0);
+    win->handle_surface_configure();
 }
 
 const xdg_surface_listener surface_listener = {
@@ -26,9 +26,7 @@ const xdg_surface_listener surface_listener = {
 
 void xdg_toplevel_configure_handler(void* data, xdg_toplevel*, int32_t width, int32_t height, wl_array*) {
     auto* win = static_cast<Window*>(data);
-    if (width > 0 && height > 0) {
-        win->handle_configure(static_cast<uint32_t>(width), static_cast<uint32_t>(height));
-    }
+    win->handle_toplevel_configure(width, height);
 }
 
 void xdg_toplevel_close_handler(void* data, xdg_toplevel*) {
@@ -110,7 +108,7 @@ void FrameContext::set_viewport_and_scissor() const {
 }
 
 Window::Window(WaylandContext& wl, VulkanContext& vk, WindowConfig config)
-    : m_config(std::move(config)), m_width(m_config.width), m_height(m_config.height) {
+    : m_wayland_ctx(&wl), m_config(std::move(config)), m_width(m_config.width), m_height(m_config.height) {
     if (m_config.buffer_count < 2) {
         m_config.buffer_count = 2;
     }
@@ -425,15 +423,6 @@ void Window::cleanup_dmabuf_buffers(VulkanContext& vk) {
     m_buffers.clear();
 }
 
-void Window::recreate_buffers(WaylandContext& wl, VulkanContext& vk) {
-    vkDeviceWaitIdle(vk.get_device());
-    cleanup_depth_buffer(vk);
-    cleanup_dmabuf_buffers(vk);
-    create_dmabuf_buffers(wl, vk);
-    create_depth_buffer(vk);
-    m_current_buffer_idx = 0;
-}
-
 void Window::create_command_resources(VulkanContext& vk) {
     VkCommandPoolCreateInfo pool_info{
         .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
@@ -533,11 +522,18 @@ void Window::cleanup(VulkanContext& vk) {
     }
 }
 
-void Window::handle_configure(uint32_t width, uint32_t height) {
+void Window::handle_toplevel_configure(int32_t width, int32_t height) {
     if (width > 0 && height > 0) {
-        if (width != m_width || height != m_height) {
-            m_width = width;
-            m_height = height;
+        m_pending_width = static_cast<uint32_t>(width);
+        m_pending_height = static_cast<uint32_t>(height);
+    }
+}
+
+void Window::handle_surface_configure() {
+    if (m_pending_width > 0 && m_pending_height > 0) {
+        if (m_pending_width != m_width || m_pending_height != m_height) {
+            m_width = m_pending_width;
+            m_height = m_pending_height;
             m_need_resize = true;
         }
     }
@@ -549,8 +545,23 @@ void Window::handle_close() {
     std::println("[Codotaku] Window '{}' closed.", m_config.title);
 }
 
+void Window::recreate_buffers(VulkanContext& vk) {
+    if (!m_wayland_ctx) return;
+    vkDeviceWaitIdle(vk.get_device());
+    cleanup_depth_buffer(vk);
+    cleanup_dmabuf_buffers(vk);
+    create_dmabuf_buffers(*m_wayland_ctx, vk);
+    create_depth_buffer(vk);
+    m_current_buffer_idx = 0;
+}
+
 std::optional<FrameContext> Window::begin_frame(VulkanContext& vk) {
     if (!m_open || !m_configured) return std::nullopt;
+
+    if (m_need_resize) {
+        m_need_resize = false;
+        recreate_buffers(vk);
+    }
 
     if (m_current_buffer_idx == 0) {
         m_frame_arena.reset();
