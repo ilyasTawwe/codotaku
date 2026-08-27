@@ -134,6 +134,7 @@ add_library(codotaku STATIC
     src/system/event_loop.cpp
     src/system/log.cpp
     src/vulkan/context.cpp
+    src/vulkan/descriptor_heap.cpp
     src/vulkan/arena.cpp
     src/vulkan/sync.cpp
     src/vulkan/uploader.cpp

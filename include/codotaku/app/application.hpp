@@ -14,6 +14,7 @@
 #include <codotaku/system/log.hpp>
 #include <codotaku/vulkan/arena.hpp>
 #include <codotaku/vulkan/context.hpp>
+#include <codotaku/vulkan/descriptor_heap.hpp>
 #include <codotaku/vulkan/gbuffer.hpp>
 #include <codotaku/vulkan/indirect.hpp>
 #include <codotaku/vulkan/pipeline.hpp>
@@ -37,10 +38,13 @@ public:
         const char* slang_code,
         VkFormat color_format = VK_FORMAT_B8G8R8A8_UNORM,
         VkFormat depth_format = VK_FORMAT_D32_SFLOAT,
+        const std::vector<DescriptorBindingMapping>& mappings = {},
         VkCullModeFlags cull_mode = VK_CULL_MODE_BACK_BIT,
         VkFrontFace front_face = VK_FRONT_FACE_COUNTER_CLOCKWISE);
 
-    Pipeline create_compute_pipeline(const char* slang_code);
+    Pipeline create_compute_pipeline(
+        const char* slang_code,
+        const std::vector<DescriptorBindingMapping>& mappings = {});
 
     bool poll_events();
 
@@ -52,6 +56,7 @@ public:
 
     WaylandContext& get_wayland() { return m_wayland; }
     VulkanContext& get_vulkan() { return m_vulkan; }
+    DescriptorHeap& get_descriptor_heap() { return m_descriptor_heap; }
     SlangCompiler& get_slang() { return m_slang; }
     EventLoop& get_event_loop() { return m_event_loop; }
     const std::vector<std::unique_ptr<Window>>& get_windows() const { return m_windows; }
@@ -64,6 +69,7 @@ private:
     EventLoop m_event_loop;
     WaylandContext m_wayland;
     VulkanContext m_vulkan;
+    DescriptorHeap m_descriptor_heap;
     SlangCompiler m_slang;
 
     std::vector<std::unique_ptr<Window>> m_windows;

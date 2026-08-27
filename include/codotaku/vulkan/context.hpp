@@ -31,6 +31,7 @@ public:
     VkQueue get_queue() const { return m_queue; }
     const VkPhysicalDeviceMemoryProperties& get_memory_properties() const { return m_memory_properties; }
     const DeviceAlignmentLimits& get_alignment_limits() const { return m_alignment_limits; }
+    const VkPhysicalDeviceDescriptorHeapPropertiesEXT& get_descriptor_heap_properties() const { return m_descriptor_heap_properties; }
     VmaAllocator get_allocator() const { return m_allocator; }
     int get_drm_fd() const { return m_drm_fd; }
 
@@ -54,6 +55,7 @@ private:
     VkQueue m_queue{VK_NULL_HANDLE};
     VkPhysicalDeviceMemoryProperties m_memory_properties{};
     DeviceAlignmentLimits m_alignment_limits{};
+    VkPhysicalDeviceDescriptorHeapPropertiesEXT m_descriptor_heap_properties{};
 
     VmaAllocator m_allocator{VK_NULL_HANDLE};
     int m_drm_fd{-1};

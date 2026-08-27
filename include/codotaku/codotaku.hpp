@@ -10,6 +10,7 @@
 #include <codotaku/vulkan/context.hpp>
 #include <codotaku/vulkan/arena.hpp>
 #include <codotaku/vulkan/sync.hpp>
+#include <codotaku/vulkan/descriptor_heap.hpp>
 #include <codotaku/vulkan/uploader.hpp>
 #include <codotaku/vulkan/texture.hpp>
 #include <codotaku/vulkan/gbuffer.hpp>

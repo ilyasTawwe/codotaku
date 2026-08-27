@@ -4,6 +4,7 @@
 #include <string>
 #include <volk.h>
 #include <vk_mem_alloc.h>
+#include <codotaku/vulkan/descriptor_heap.hpp>
 
 namespace codotaku {
 
@@ -46,6 +47,8 @@ public:
         uint32_t height,
         const TextureDesc& desc = {});
 
+    void write_to_descriptor_heap(DescriptorHeap& heap);
+
     void cleanup();
 
     VkImage get_image() const { return m_image; }
@@ -56,13 +59,9 @@ public:
     uint32_t get_height() const { return m_desc.height; }
     const TextureDesc& get_desc() const { return m_desc; }
 
-    VkDescriptorImageInfo get_descriptor_image_info(VkImageLayout layout = VK_IMAGE_LAYOUT_GENERAL) const {
-        return VkDescriptorImageInfo{
-            .sampler = m_sampler,
-            .imageView = m_view,
-            .imageLayout = layout,
-        };
-    }
+    uint32_t get_sampled_heap_offset() const { return m_sampled_heap_offset; }
+    uint32_t get_storage_heap_offset() const { return m_storage_heap_offset; }
+    uint32_t get_sampler_heap_offset() const { return m_sampler_heap_offset; }
 
 private:
     VkDevice m_device{VK_NULL_HANDLE};
@@ -73,6 +72,10 @@ private:
     VkImageView m_view{VK_NULL_HANDLE};
     VmaAllocation m_allocation{VK_NULL_HANDLE};
     VkSampler m_sampler{VK_NULL_HANDLE};
+
+    uint32_t m_sampled_heap_offset{0};
+    uint32_t m_storage_heap_offset{0};
+    uint32_t m_sampler_heap_offset{0};
 };
 
 } // namespace codotaku

@@ -11,14 +11,17 @@ Texture::~Texture() {
     cleanup();
 }
 
-Texture::Texture(Texture&& other) noexcept
+Texture::    Texture(Texture&& other) noexcept
     : m_device(std::exchange(other.m_device, VK_NULL_HANDLE)),
       m_allocator(std::exchange(other.m_allocator, VK_NULL_HANDLE)),
       m_desc(std::exchange(other.m_desc, {})),
       m_image(std::exchange(other.m_image, VK_NULL_HANDLE)),
       m_view(std::exchange(other.m_view, VK_NULL_HANDLE)),
       m_allocation(std::exchange(other.m_allocation, VK_NULL_HANDLE)),
-      m_sampler(std::exchange(other.m_sampler, VK_NULL_HANDLE)) {}
+      m_sampler(std::exchange(other.m_sampler, VK_NULL_HANDLE)),
+      m_sampled_heap_offset(std::exchange(other.m_sampled_heap_offset, 0)),
+      m_storage_heap_offset(std::exchange(other.m_storage_heap_offset, 0)),
+      m_sampler_heap_offset(std::exchange(other.m_sampler_heap_offset, 0)) {}
 
 Texture& Texture::operator=(Texture&& other) noexcept {
     if (this != &other) {
@@ -30,6 +33,9 @@ Texture& Texture::operator=(Texture&& other) noexcept {
         m_view = std::exchange(other.m_view, VK_NULL_HANDLE);
         m_allocation = std::exchange(other.m_allocation, VK_NULL_HANDLE);
         m_sampler = std::exchange(other.m_sampler, VK_NULL_HANDLE);
+        m_sampled_heap_offset = std::exchange(other.m_sampled_heap_offset, 0);
+        m_storage_heap_offset = std::exchange(other.m_storage_heap_offset, 0);
+        m_sampler_heap_offset = std::exchange(other.m_sampler_heap_offset, 0);
     }
     return *this;
 }
@@ -136,6 +142,51 @@ Texture Texture::create_uninitialized(
     Texture tex;
     tex.init(device, allocator, image, view, allocation, sampler, final_desc);
     return tex;
+}
+
+void Texture::write_to_descriptor_heap(DescriptorHeap& heap) {
+    if (m_image != VK_NULL_HANDLE) {
+        VkImageViewCreateInfo view_ci{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .image = m_image,
+            .viewType = VK_IMAGE_VIEW_TYPE_2D,
+            .format = m_desc.format,
+            .subresourceRange = {
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        };
+
+        if (m_desc.usage & VK_IMAGE_USAGE_SAMPLED_BIT) {
+            m_sampled_heap_offset = heap.write_sampled_image(view_ci, VK_IMAGE_LAYOUT_GENERAL);
+        }
+        if (m_desc.usage & VK_IMAGE_USAGE_STORAGE_BIT) {
+            m_storage_heap_offset = heap.write_storage_image(view_ci, VK_IMAGE_LAYOUT_GENERAL);
+        }
+    }
+    if (m_sampler != VK_NULL_HANDLE) {
+        VkSamplerCreateInfo sampler_info{
+            .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+            .magFilter = m_desc.mag_filter,
+            .minFilter = m_desc.min_filter,
+            .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+            .addressModeU = m_desc.address_mode,
+            .addressModeV = m_desc.address_mode,
+            .addressModeW = m_desc.address_mode,
+            .mipLodBias = 0.0f,
+            .anisotropyEnable = VK_TRUE,
+            .maxAnisotropy = 16.0f,
+            .compareEnable = VK_FALSE,
+            .minLod = 0.0f,
+            .maxLod = 0.0f,
+            .borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK,
+            .unnormalizedCoordinates = VK_FALSE,
+        };
+        m_sampler_heap_offset = heap.write_sampler(sampler_info);
+    }
 }
 
 void Texture::cleanup() {

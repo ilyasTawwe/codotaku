@@ -235,13 +235,8 @@ int main() {
         // 5. Submit geometry DMA copies to GPU in background
         uploader.upload();
 
-        // ---------------------------------------------------------------------
-        // COMPUTE SHADER: Generate textures on the GPU on the fly!
-        // ---------------------------------------------------------------------
-        auto compute_pipeline = app.create_compute_pipeline(COMPUTE_TEXTURE_GEN_SLANG);
-
-        // Create 2 storage images (256x256)
-        codotaku::TextureDesc tex_desc{
+        codotaku::TextureDesc tex_desc = {
+            .name = "procedural_gpu_texture",
             .format = VK_FORMAT_R8G8B8A8_UNORM,
             .min_filter = VK_FILTER_LINEAR,
             .mag_filter = VK_FILTER_LINEAR,
@@ -249,8 +244,20 @@ int main() {
         auto checkerboard_tex = codotaku::Texture::create_uninitialized(vk, 256, 256, tex_desc);
         auto grid_tex = codotaku::Texture::create_uninitialized(vk, 256, 256, tex_desc);
 
-        VkDescriptorSet checkerboard_storage_set = compute_pipeline.create_storage_image_descriptor_set(checkerboard_tex.get_view(), 0, 0);
-        VkDescriptorSet grid_storage_set = compute_pipeline.create_storage_image_descriptor_set(grid_tex.get_view(), 0, 0);
+        // Write image and sampler descriptors to VK_EXT_descriptor_heap
+        checkerboard_tex.write_to_descriptor_heap(app.get_descriptor_heap());
+        grid_tex.write_to_descriptor_heap(app.get_descriptor_heap());
+
+        // ---------------------------------------------------------------------
+        // COMPUTE SHADER TEXTURE GENERATION ON GPU VIA VK_EXT_descriptor_heap
+        // ---------------------------------------------------------------------
+        auto compute_pipeline_checker = app.create_compute_pipeline(
+            COMPUTE_TEXTURE_GEN_SLANG,
+            { codotaku::Pipeline::map_storage_image(0, 0, checkerboard_tex.get_storage_heap_offset()) });
+
+        auto compute_pipeline_grid = app.create_compute_pipeline(
+            COMPUTE_TEXTURE_GEN_SLANG,
+            { codotaku::Pipeline::map_storage_image(0, 0, grid_tex.get_storage_heap_offset()) });
 
         // Execute compute dispatches on the GPU to generate both textures directly into VRAM
         vk.execute_single_time_commands([&](VkCommandBuffer cmd) {
@@ -299,18 +306,19 @@ int main() {
             };
             vkCmdPipelineBarrier2(cmd, &pre_dep);
 
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compute_pipeline.get_pipeline());
+            // Bind Global Descriptor Heaps
+            app.get_descriptor_heap().bind(cmd);
 
             // Dispatch 1: Generate Checkerboard (pattern_type = 0)
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compute_pipeline_checker.get_pipeline());
             struct { uint32_t width, height, pattern_type; float time; } pc0 = { 256, 256, 0, 0.0f };
-            vkCmdPushConstants(cmd, compute_pipeline.get_layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc0), &pc0);
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compute_pipeline.get_layout(), 0, 1, &checkerboard_storage_set, 0, nullptr);
+            codotaku::DescriptorHeap::push_data(cmd, pc0);
             vkCmdDispatch(cmd, 256 / 16, 256 / 16, 1);
 
             // Dispatch 2: Generate Grid Pattern (pattern_type = 1)
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compute_pipeline_grid.get_pipeline());
             struct { uint32_t width, height, pattern_type; float time; } pc1 = { 256, 256, 1, 0.0f };
-            vkCmdPushConstants(cmd, compute_pipeline.get_layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc1), &pc1);
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compute_pipeline.get_layout(), 0, 1, &grid_storage_set, 0, nullptr);
+            codotaku::DescriptorHeap::push_data(cmd, pc1);
             vkCmdDispatch(cmd, 256 / 16, 256 / 16, 1);
 
             // Coalesced memory barrier: Ensures compute storage image writes are visible to fragment shader sampling
@@ -330,16 +338,24 @@ int main() {
             vkCmdPipelineBarrier2(cmd, &post_dep);
         });
 
-        compute_pipeline.cleanup();
-        std::println("[Main] Successfully generated textures on the fly using Slang compute shader!");
+        compute_pipeline_checker.cleanup();
+        compute_pipeline_grid.cleanup();
+        std::println("[Main] Successfully generated textures on the fly using VK_EXT_descriptor_heap compute pipeline!");
 
         // ---------------------------------------------------------------------
         // GRAPHICS PIPELINE & WINDOW CREATION
         // ---------------------------------------------------------------------
-        auto graphics_pipeline = app.create_pipeline(GRAPHICS_SHADER_SLANG);
+        auto graphics_pipeline_checker = app.create_pipeline(
+            GRAPHICS_SHADER_SLANG,
+            VK_FORMAT_B8G8R8A8_UNORM,
+            VK_FORMAT_D32_SFLOAT,
+            { codotaku::Pipeline::map_sampled_texture(0, 0, checkerboard_tex.get_sampled_heap_offset(), checkerboard_tex.get_sampler_heap_offset()) });
 
-        VkDescriptorSet checkerboard_sampled_set = graphics_pipeline.create_texture_descriptor_set(checkerboard_tex, 0, 0);
-        VkDescriptorSet grid_sampled_set = graphics_pipeline.create_texture_descriptor_set(grid_tex, 0, 0);
+        auto graphics_pipeline_grid = app.create_pipeline(
+            GRAPHICS_SHADER_SLANG,
+            VK_FORMAT_B8G8R8A8_UNORM,
+            VK_FORMAT_D32_SFLOAT,
+            { codotaku::Pipeline::map_sampled_texture(0, 0, grid_tex.get_sampled_heap_offset(), grid_tex.get_sampler_heap_offset()) });
 
         codotaku::Camera camera({0.0f, 1.4f, 3.2f}, {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, 45.0f);
 
@@ -433,31 +449,19 @@ int main() {
             // Direct Vulkan Dynamic Rendering pass (operating uniformly in GENERAL layout)
             frame.begin_rendering_with_attachment({.float32 = {0.05f, 0.05f, 0.08f, 1.0f}}, 0, 1.0f);
             frame.set_viewport_and_scissor();
-            frame.set_viewport_and_scissor();
 
-            vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, graphics_pipeline.get_pipeline());
+            // Bind global descriptor heaps
+            app.get_descriptor_heap().bind(frame.cmd);
 
-            // Bind window texture descriptor set (Grid vs Checkerboard)
-            VkDescriptorSet active_desc_set = (window.get_title().find("Grid") != std::string::npos)
-                                                  ? grid_sampled_set
-                                                  : checkerboard_sampled_set;
-            vkCmdBindDescriptorSets(
+            bool is_grid = (window.get_title().find("Grid") != std::string::npos);
+            vkCmdBindPipeline(
                 frame.cmd,
                 VK_PIPELINE_BIND_POINT_GRAPHICS,
-                graphics_pipeline.get_layout(),
-                0, 1,
-                &active_desc_set,
-                0, nullptr);
+                is_grid ? graphics_pipeline_grid.get_pipeline() : graphics_pipeline_checker.get_pipeline());
 
-            // Push 8-byte Root Scene BDA address
+            // Push 8-byte Root Scene BDA address via VK_EXT_descriptor_heap Push Data!
             uint64_t scene_addr = scene_suballoc.device_address;
-            vkCmdPushConstants(
-                frame.cmd,
-                graphics_pipeline.get_layout(),
-                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                0,
-                sizeof(uint64_t),
-                &scene_addr);
+            codotaku::DescriptorHeap::push_data(frame.cmd, scene_addr);
 
             // GPU-Driven Indirect Draw!
             vkCmdDrawIndirect(
@@ -473,7 +477,8 @@ int main() {
         checkerboard_tex.cleanup();
         grid_tex.cleanup();
         geometry_arena.cleanup(vk.get_allocator());
-        graphics_pipeline.cleanup();
+        graphics_pipeline_checker.cleanup();
+        graphics_pipeline_grid.cleanup();
         return ret;
 
     } catch (const std::exception& e) {

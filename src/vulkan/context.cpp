@@ -171,9 +171,13 @@ void VulkanContext::select_physical_device() {
 
     vkGetPhysicalDeviceMemoryProperties(m_physical_device, &m_memory_properties);
 
-    // Query Physical Device Properties & Alignment Limits
+    // Query Physical Device Properties, Descriptor Heap Properties & Alignment Limits
+    m_descriptor_heap_properties = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_HEAP_PROPERTIES_EXT,
+    };
     VkPhysicalDeviceProperties2 props2{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+        .pNext = &m_descriptor_heap_properties,
     };
     vkGetPhysicalDeviceProperties2(m_physical_device, &props2);
 
@@ -183,11 +187,11 @@ void VulkanContext::select_physical_device() {
     m_alignment_limits.optimal_buffer_copy_offset_alignment = std::max(VkDeviceSize(16), props2.properties.limits.optimalBufferCopyOffsetAlignment);
     m_alignment_limits.optimal_buffer_copy_row_pitch_alignment = std::max(VkDeviceSize(16), props2.properties.limits.optimalBufferCopyRowPitchAlignment);
 
-    std::println("[Codotaku] Selected GPU: {} (Storage Align: {} B, Optimal Copy Align: {} B, Pitch Align: {} B)",
+    std::println("[Codotaku] Selected GPU: {} (Storage Align: {} B, Descriptor Heap: ResAlign {} B / SampAlign {} B)",
         props2.properties.deviceName,
         m_alignment_limits.min_storage_buffer_offset_alignment,
-        m_alignment_limits.optimal_buffer_copy_offset_alignment,
-        m_alignment_limits.optimal_buffer_copy_row_pitch_alignment);
+        m_descriptor_heap_properties.resourceHeapAlignment,
+        m_descriptor_heap_properties.samplerHeapAlignment);
 }
 
 void VulkanContext::create_logical_device() {
@@ -205,6 +209,7 @@ void VulkanContext::create_logical_device() {
         VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME,
         VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME,
         VK_KHR_UNIFIED_IMAGE_LAYOUTS_EXTENSION_NAME,
+        VK_EXT_DESCRIPTOR_HEAP_EXTENSION_NAME,
     };
 
     VkPhysicalDeviceFeatures features{
@@ -213,8 +218,14 @@ void VulkanContext::create_logical_device() {
         .shaderInt16 = VK_TRUE,
     };
 
+    VkPhysicalDeviceDescriptorHeapFeaturesEXT descriptor_heap_features{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_HEAP_FEATURES_EXT,
+        .descriptorHeap = VK_TRUE,
+    };
+
     VkPhysicalDeviceVulkan11Features vulkan11_features{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
+        .pNext = &descriptor_heap_features,
         .shaderDrawParameters = VK_TRUE,
     };
 
