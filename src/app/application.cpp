@@ -1,3 +1,4 @@
+#include <atomic>
 #include <chrono>
 #include <csignal>
 #include <iostream>
@@ -5,6 +6,7 @@
 #include <print>
 
 #include <codotaku/app/application.hpp>
+#include <codotaku/system/log.hpp>
 
 namespace codotaku {
 
@@ -22,16 +24,34 @@ Application::Application(std::string app_name)
     : m_app_name(std::move(app_name)) {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
-
-    std::println("[Codotaku] Initializing Engine '{}' (C++26)...", m_app_name);
+    log_info("[Codotaku] Initializing Engine '{}' (C++26)...", m_app_name);
+    setup_event_loop_handlers();
 }
 
 Application::~Application() {
-    std::println("[Codotaku] Shutting down application and cleaning resources...");
+    log_info("[Codotaku] Shutting down application and cleaning resources...");
     for (auto& win : m_windows) {
         win->cleanup(m_vulkan);
     }
     m_windows.clear();
+}
+
+void Application::setup_event_loop_handlers() {
+    // Register Unix Signals with sd-event
+    m_event_loop.add_signal(SIGINT, [this](int) {
+        log_info("[Codotaku] SIGINT received via sd-event. Terminating...");
+        for (auto& win : m_windows) {
+            win->close();
+        }
+        m_event_loop.exit(0);
+    });
+    m_event_loop.add_signal(SIGTERM, [this](int) {
+        log_info("[Codotaku] SIGTERM received via sd-event. Terminating...");
+        for (auto& win : m_windows) {
+            win->close();
+        }
+        m_event_loop.exit(0);
+    });
 }
 
 Window* Application::create_window(WindowConfig config) {
@@ -67,38 +87,47 @@ Pipeline Application::create_compute_pipeline(const char* slang_code) {
 }
 
 bool Application::poll_events() {
-    if ((m_close_policy != WindowClosePolicy::Manual && m_windows.empty()) || g_interrupted.load()) {
+    if (g_interrupted.load() || (m_close_policy != WindowClosePolicy::Manual && m_windows.empty())) {
         return false;
     }
 
-    while (wl_display_prepare_read(m_wayland.get_display()) != 0) {
+    // 1. Prepare Wayland read intent
+    while (m_wayland.get_display() && wl_display_prepare_read(m_wayland.get_display()) != 0) {
         m_wayland.dispatch_pending();
     }
     m_wayland.flush();
 
+    // 2. Non-blocking poll on Wayland socket
     struct pollfd pfd = {
         .fd = wl_display_get_fd(m_wayland.get_display()),
         .events = POLLIN,
         .revents = 0,
     };
 
-    int ret = poll(&pfd, 1, 10);
-    if (ret > 0) {
+    int ret = poll(&pfd, 1, 0);
+    if (ret > 0 && (pfd.revents & POLLIN)) {
         wl_display_read_events(m_wayland.get_display());
         m_wayland.dispatch_pending();
     } else {
         wl_display_cancel_read(m_wayland.get_display());
     }
 
-    // Process closed windows according to the configured WindowClosePolicy
+    // 3. Process systemd sd-event sources (signals, timers, deferred tasks) without blocking
+    m_event_loop.run_iteration(0);
+
+    if (g_interrupted.load()) {
+        return false;
+    }
+
+    // 4. Process closed windows according to the configured WindowClosePolicy
     bool should_terminate = false;
     for (auto it = m_windows.begin(); it != m_windows.end();) {
         if (!(*it)->is_open()) {
             if (m_close_policy == WindowClosePolicy::QuitOnAnyWindowClose) {
-                std::println("[Codotaku] Terminating application (Policy: QuitOnAnyWindowClose).");
+                log_info("[Codotaku] Terminating application (Policy: QuitOnAnyWindowClose).");
                 should_terminate = true;
             } else if (m_close_policy == WindowClosePolicy::QuitOnPrimaryWindowClose && (*it)->is_primary()) {
-                std::println("[Codotaku] Primary window closed. Terminating application (Policy: QuitOnPrimaryWindowClose).");
+                log_info("[Codotaku] Primary window closed. Terminating application (Policy: QuitOnPrimaryWindowClose).");
                 should_terminate = true;
             }
             (*it)->cleanup(m_vulkan);
@@ -113,18 +142,20 @@ bool Application::poll_events() {
             win->cleanup(m_vulkan);
         }
         m_windows.clear();
+        m_event_loop.exit(0);
         return false;
     }
 
     if (m_close_policy != WindowClosePolicy::Manual && m_windows.empty()) {
+        m_event_loop.exit(0);
         return false;
     }
 
-    return !g_interrupted.load();
+    return true;
 }
 
 int Application::run(const RenderCallback& render_callback) {
-    std::println("[Codotaku] Starting render loop with {} window(s)...", m_windows.size());
+    log_info("[Codotaku] Starting render loop with {} window(s)...", m_windows.size());
     std::fflush(stdout);
 
     while (poll_events()) {
@@ -136,7 +167,7 @@ int Application::run(const RenderCallback& render_callback) {
         }
     }
 
-    std::println("[Codotaku] Render loop exited.");
+    log_info("[Codotaku] Render loop exited.");
     return 0;
 }
 

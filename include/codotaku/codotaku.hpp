@@ -3,6 +3,8 @@
 #include <codotaku/core/types.hpp>
 #include <codotaku/core/camera.hpp>
 #include <codotaku/core/scene.hpp>
+#include <codotaku/system/event_loop.hpp>
+#include <codotaku/system/log.hpp>
 #include <codotaku/wayland/context.hpp>
 #include <codotaku/wayland/window.hpp>
 #include <codotaku/vulkan/context.hpp>

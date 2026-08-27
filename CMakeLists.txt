@@ -25,6 +25,7 @@ FetchContent_MakeAvailable(VulkanMemoryAllocator)
 
 pkg_check_modules(WAYLAND REQUIRED IMPORTED_TARGET wayland-client wayland-protocols)
 pkg_check_modules(DRM REQUIRED IMPORTED_TARGET libdrm)
+pkg_check_modules(SYSTEMD REQUIRED IMPORTED_TARGET libsystemd)
 pkg_get_variable(WAYLAND_SCANNER wayland-scanner wayland_scanner)
 pkg_get_variable(WAYLAND_PROTOCOLS_DIR wayland-protocols pkgdatadir)
 
@@ -130,6 +131,8 @@ add_library(codotaku STATIC
     "${SYNCOBJ_CODE}"
     "${XDG_DECORATION_HEADER}"
     "${XDG_DECORATION_CODE}"
+    src/system/event_loop.cpp
+    src/system/log.cpp
     src/vulkan/context.cpp
     src/vulkan/arena.cpp
     src/vulkan/sync.cpp
@@ -171,6 +174,7 @@ target_link_libraries(codotaku
         "${SLANG_COMPILER_LIBRARY}"
         PkgConfig::WAYLAND
         PkgConfig::DRM
+        PkgConfig::SYSTEMD
 )
 
 # ==============================================================================

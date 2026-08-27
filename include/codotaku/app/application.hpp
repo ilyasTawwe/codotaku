@@ -10,6 +10,8 @@
 #include <codotaku/core/scene.hpp>
 #include <codotaku/core/types.hpp>
 #include <codotaku/shader/slang_compiler.hpp>
+#include <codotaku/system/event_loop.hpp>
+#include <codotaku/system/log.hpp>
 #include <codotaku/vulkan/arena.hpp>
 #include <codotaku/vulkan/context.hpp>
 #include <codotaku/vulkan/gbuffer.hpp>
@@ -51,11 +53,15 @@ public:
     WaylandContext& get_wayland() { return m_wayland; }
     VulkanContext& get_vulkan() { return m_vulkan; }
     SlangCompiler& get_slang() { return m_slang; }
+    EventLoop& get_event_loop() { return m_event_loop; }
     const std::vector<std::unique_ptr<Window>>& get_windows() const { return m_windows; }
 
 private:
+    void setup_event_loop_handlers();
+
     std::string m_app_name;
     WindowClosePolicy m_close_policy{WindowClosePolicy::QuitOnLastWindowClose};
+    EventLoop m_event_loop;
     WaylandContext m_wayland;
     VulkanContext m_vulkan;
     SlangCompiler m_slang;
