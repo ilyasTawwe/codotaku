@@ -207,13 +207,38 @@ int main() {
         codotaku::Application app("Codotaku Engine Demo (Multi-Device Multi-GPU Capable)");
 
         // ---------------------------------------------------------------------
-        // 1. CREATE INDEPENDENT LOGICAL DEVICES EXPLICITLY
+        // 1. COMPILE SLANG SHADERS ONCE AT STARTUP (REUSED ACROSS ALL DEVICES)
         // ---------------------------------------------------------------------
-        auto dev1 = app.create_device(); // Logical Device 1 (Primary GPU)
-        auto dev2 = app.create_device(); // Logical Device 2 (Separate Logical GPU)
+        std::println("[Main] Compiling Slang compute & graphics shaders once...");
+        const auto compiled_compute = app.get_slang().compile_source(COMPUTE_TEXTURE_GEN_SLANG, "Compute Texture Gen");
+        const auto compiled_graphics = app.get_slang().compile_source(GRAPHICS_SHADER_SLANG, "Graphics 3D Cube BDA");
 
         // ---------------------------------------------------------------------
-        // 2. INITIALIZE RESOURCES ON DEVICE 1 (DEV1)
+        // 2. CREATE INDEPENDENT LOGICAL DEVICES WITH GPU SELECTOR CALLBACKS
+        // ---------------------------------------------------------------------
+        codotaku::DeviceConfig dev1_config{
+            .gpu_selector = [](const codotaku::PhysicalDeviceInfo& info) -> int {
+                if (!info.has_graphics()) return -1;
+                int score = codotaku::GpuPreference::DiscreteFirst(info);
+                std::println("[Device 1 Selector] Evaluating GPU '{}' (Discrete: {}, Rating Score: {})",
+                    info.properties.deviceName, info.is_discrete(), score);
+                return score;
+            },
+        };
+        auto dev1 = std::make_unique<codotaku::VulkanDevice>(app.get_vulkan_instance(), dev1_config);
+
+        codotaku::DeviceConfig dev2_config{
+            .gpu_selector = [](const codotaku::PhysicalDeviceInfo& info) -> int {
+                if (!info.has_graphics()) return -1;
+                std::println("[Device 2 Selector] Selecting GPU for separate logical device: '{}'",
+                    info.properties.deviceName);
+                return 100;
+            },
+        };
+        auto dev2 = std::make_unique<codotaku::VulkanDevice>(app.get_vulkan_instance(), dev2_config);
+
+        // ---------------------------------------------------------------------
+        // 3. INITIALIZE RESOURCES ON DEVICE 1 (DEV1)
         // ---------------------------------------------------------------------
         codotaku::Uploader uploader(*dev1);
 
@@ -250,18 +275,14 @@ int main() {
         checkerboard_tex.write_to_descriptor_heap(dev1->descriptor_heap());
         grid_tex.write_to_descriptor_heap(dev1->descriptor_heap());
 
-        // Compute Shader Texture Generation on DEV1
-        auto compute_pipeline_checker = codotaku::Pipeline{};
-        compute_pipeline_checker.init_compute(
-            *dev1,
-            app.get_slang().compile_source(COMPUTE_TEXTURE_GEN_SLANG, "Dev1 Checker Compute"),
+        // Compute Shader Texture Generation on DEV1 reusing precompiled SPIR-V
+        auto compute_pipeline_checker = dev1->create_compute_pipeline(
+            compiled_compute,
             { codotaku::Pipeline::map_storage_image(0, 0, checkerboard_tex.get_storage_heap_offset()) },
             "Dev1 Checker Compute");
 
-        auto compute_pipeline_grid = codotaku::Pipeline{};
-        compute_pipeline_grid.init_compute(
-            *dev1,
-            app.get_slang().compile_source(COMPUTE_TEXTURE_GEN_SLANG, "Dev1 Grid Compute"),
+        auto compute_pipeline_grid = dev1->create_compute_pipeline(
+            compiled_compute,
             { codotaku::Pipeline::map_storage_image(0, 0, grid_tex.get_storage_heap_offset()) },
             "Dev1 Grid Compute");
 
@@ -367,11 +388,9 @@ int main() {
         auto dev2_grid_tex = codotaku::Texture::create_uninitialized(*dev2, 256, 256, tex_desc);
         dev2_grid_tex.write_to_descriptor_heap(dev2->descriptor_heap());
 
-        // DEV2 Compute Texture Generation Pipeline
-        auto dev2_compute_pipeline = codotaku::Pipeline{};
-        dev2_compute_pipeline.init_compute(
-            *dev2,
-            app.get_slang().compile_source(COMPUTE_TEXTURE_GEN_SLANG, "Dev2 Compute Pipeline"),
+        // DEV2 Compute Texture Generation Pipeline reusing precompiled SPIR-V
+        auto dev2_compute_pipeline = dev2->create_compute_pipeline(
+            compiled_compute,
             { codotaku::Pipeline::map_storage_image(0, 0, dev2_grid_tex.get_storage_heap_offset()) },
             "Dev2 Compute Pipeline");
 
@@ -431,12 +450,10 @@ int main() {
         dev2_compute_pipeline.cleanup();
 
         // ---------------------------------------------------------------------
-        // 4. GRAPHICS PIPELINES FOR DEVICE 1 (DEV1) AND DEVICE 2 (DEV2)
+        // 4. GRAPHICS PIPELINES (REUSING PRECOMPILED SPIR-V)
         // ---------------------------------------------------------------------
-        auto graphics_pipeline_checker = codotaku::Pipeline{};
-        graphics_pipeline_checker.init_dynamic_rendering_bda(
-            *dev1,
-            app.get_slang().compile_source(GRAPHICS_SHADER_SLANG, "Dev1 Checker Graphics Pipeline"),
+        auto graphics_pipeline_checker = dev1->create_pipeline(
+            compiled_graphics,
             VK_FORMAT_B8G8R8A8_UNORM,
             VK_FORMAT_D32_SFLOAT,
             { codotaku::Pipeline::map_sampled_texture(0, 0, checkerboard_tex.get_sampled_heap_offset(), checkerboard_tex.get_sampler_heap_offset()) },
@@ -444,10 +461,8 @@ int main() {
             VK_FRONT_FACE_COUNTER_CLOCKWISE,
             "Dev1 Checker Graphics Pipeline");
 
-        auto dev2_graphics_pipeline = codotaku::Pipeline{};
-        dev2_graphics_pipeline.init_dynamic_rendering_bda(
-            *dev2,
-            app.get_slang().compile_source(GRAPHICS_SHADER_SLANG, "Dev2 Graphics Pipeline"),
+        auto dev2_graphics_pipeline = dev2->create_pipeline(
+            compiled_graphics,
             VK_FORMAT_B8G8R8A8_UNORM,
             VK_FORMAT_D32_SFLOAT,
             { codotaku::Pipeline::map_sampled_texture(0, 0, dev2_grid_tex.get_sampled_heap_offset(), dev2_grid_tex.get_sampler_heap_offset()) },
