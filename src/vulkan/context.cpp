@@ -173,6 +173,7 @@ void VulkanContext::create_logical_device() {
     };
 
     VkPhysicalDeviceFeatures features{
+        .samplerAnisotropy = VK_TRUE,
         .shaderInt64 = VK_TRUE,
         .shaderInt16 = VK_TRUE,
     };
@@ -265,6 +266,50 @@ VkDeviceAddress VulkanContext::get_buffer_device_address(VkBuffer buffer) const 
         .buffer = buffer,
     };
     return vkGetBufferDeviceAddress(m_device, &info);
+}
+
+void VulkanContext::execute_single_time_commands(const std::function<void(VkCommandBuffer cmd)>& record_fn) const {
+    VkCommandPoolCreateInfo pool_info{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
+        .queueFamilyIndex = m_queue_family_index,
+    };
+    VkCommandPool pool = VK_NULL_HANDLE;
+    if (vkCreateCommandPool(m_device, &pool_info, nullptr, &pool) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create transient command pool for one-time submission");
+    }
+
+    VkCommandBufferAllocateInfo alloc_info{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = pool,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = 1,
+    };
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    if (vkAllocateCommandBuffers(m_device, &alloc_info, &cmd) != VK_SUCCESS) {
+        vkDestroyCommandPool(m_device, pool, nullptr);
+        throw std::runtime_error("Failed to allocate command buffer for one-time submission");
+    }
+
+    VkCommandBufferBeginInfo begin_info{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+    };
+    vkBeginCommandBuffer(cmd, &begin_info);
+
+    record_fn(cmd);
+
+    vkEndCommandBuffer(cmd);
+
+    VkSubmitInfo submit_info{
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &cmd,
+    };
+    vkQueueSubmit(m_queue, 1, &submit_info, VK_NULL_HANDLE);
+    vkQueueWaitIdle(m_queue);
+
+    vkDestroyCommandPool(m_device, pool, nullptr);
 }
 
 void VulkanContext::cleanup() {

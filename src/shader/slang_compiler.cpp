@@ -65,10 +65,11 @@ CompiledShaders SlangCompiler::compile_source(const char* source_code, const cha
 
     auto layout = linked_program->getLayout();
 
-    // Reflect Push Constants
+    // Reflect Push Constants and Descriptor Set Bindings
     for (unsigned i = 0; i < layout->getParameterCount(); ++i) {
         auto param = layout->getParameterByIndex(i);
-        if (param->getCategory() == slang::ParameterCategory::PushConstantBuffer) {
+        auto category = param->getCategory();
+        if (category == slang::ParameterCategory::PushConstantBuffer) {
             uint32_t size = sizeof(uint64_t); // 8 bytes for BDA pointer
 
             result.reflection.push_constants.push_back({
@@ -76,6 +77,20 @@ CompiledShaders SlangCompiler::compile_source(const char* source_code, const cha
                 .offset = 0,
                 .size = size,
             });
+            std::println("  [Slang Reflection] Push Constant Range: size={} bytes", size);
+        } else {
+            uint32_t set = static_cast<uint32_t>(param->getBindingSpace());
+            uint32_t binding = static_cast<uint32_t>(param->getBindingIndex());
+
+            result.reflection.descriptor_sets[set].push_back({
+                .set = set,
+                .binding = binding,
+                .descriptor_type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .stage_flags = VK_SHADER_STAGE_ALL_GRAPHICS,
+            });
+
+            std::println("  [Slang Reflection] Descriptor Binding: Set {}, Binding {}, Type CombinedImageSampler",
+                set, binding);
         }
     }
 

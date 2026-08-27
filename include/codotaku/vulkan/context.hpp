@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <vector>
 #include <volk.h>
 #include <vk_mem_alloc.h>
@@ -26,6 +27,7 @@ public:
 
     uint32_t find_memory_type(uint32_t type_filter, VkMemoryPropertyFlags properties) const;
     VkDeviceAddress get_buffer_device_address(VkBuffer buffer) const;
+    void execute_single_time_commands(const std::function<void(VkCommandBuffer cmd)>& record_fn) const;
 
 private:
     void init_instance();

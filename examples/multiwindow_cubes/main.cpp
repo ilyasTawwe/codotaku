@@ -4,43 +4,43 @@
 
 #include <codotaku/codotaku.hpp>
 
-// 24 vertices for 6 faces with crisp per-face normals
+// 24 vertices for 6 faces with crisp per-face normals & UV coordinates
 const std::vector<codotaku::Vertex> CUBE_VERTICES = {
     // Front face (Z = +0.5) - Red
-    { {-0.5f, -0.5f,  0.5f}, {1.0f, 0.25f, 0.25f}, { 0.0f,  0.0f,  1.0f} },
-    { { 0.5f, -0.5f,  0.5f}, {1.0f, 0.25f, 0.25f}, { 0.0f,  0.0f,  1.0f} },
-    { { 0.5f,  0.5f,  0.5f}, {1.0f, 0.25f, 0.25f}, { 0.0f,  0.0f,  1.0f} },
-    { {-0.5f,  0.5f,  0.5f}, {1.0f, 0.25f, 0.25f}, { 0.0f,  0.0f,  1.0f} },
+    { {-0.5f, -0.5f,  0.5f}, {1.0f, 0.25f, 0.25f}, { 0.0f,  0.0f,  1.0f}, {0.0f, 0.0f} },
+    { { 0.5f, -0.5f,  0.5f}, {1.0f, 0.25f, 0.25f}, { 0.0f,  0.0f,  1.0f}, {1.0f, 0.0f} },
+    { { 0.5f,  0.5f,  0.5f}, {1.0f, 0.25f, 0.25f}, { 0.0f,  0.0f,  1.0f}, {1.0f, 1.0f} },
+    { {-0.5f,  0.5f,  0.5f}, {1.0f, 0.25f, 0.25f}, { 0.0f,  0.0f,  1.0f}, {0.0f, 1.0f} },
 
     // Back face (Z = -0.5) - Cyan
-    { { 0.5f, -0.5f, -0.5f}, {0.25f, 1.0f, 1.0f}, { 0.0f,  0.0f, -1.0f} },
-    { {-0.5f, -0.5f, -0.5f}, {0.25f, 1.0f, 1.0f}, { 0.0f,  0.0f, -1.0f} },
-    { {-0.5f,  0.5f, -0.5f}, {0.25f, 1.0f, 1.0f}, { 0.0f,  0.0f, -1.0f} },
-    { { 0.5f,  0.5f, -0.5f}, {0.25f, 1.0f, 1.0f}, { 0.0f,  0.0f, -1.0f} },
+    { { 0.5f, -0.5f, -0.5f}, {0.25f, 1.0f, 1.0f}, { 0.0f,  0.0f, -1.0f}, {0.0f, 0.0f} },
+    { {-0.5f, -0.5f, -0.5f}, {0.25f, 1.0f, 1.0f}, { 0.0f,  0.0f, -1.0f}, {1.0f, 0.0f} },
+    { {-0.5f,  0.5f, -0.5f}, {0.25f, 1.0f, 1.0f}, { 0.0f,  0.0f, -1.0f}, {1.0f, 1.0f} },
+    { { 0.5f,  0.5f, -0.5f}, {0.25f, 1.0f, 1.0f}, { 0.0f,  0.0f, -1.0f}, {0.0f, 1.0f} },
 
     // Top face (Y = -0.5) - Green
-    { {-0.5f, -0.5f, -0.5f}, {0.25f, 1.0f, 0.25f}, { 0.0f, -1.0f,  0.0f} },
-    { { 0.5f, -0.5f, -0.5f}, {0.25f, 1.0f, 0.25f}, { 0.0f, -1.0f,  0.0f} },
-    { { 0.5f, -0.5f,  0.5f}, {0.25f, 1.0f, 0.25f}, { 0.0f, -1.0f,  0.0f} },
-    { {-0.5f, -0.5f,  0.5f}, {0.25f, 1.0f, 0.25f}, { 0.0f, -1.0f,  0.0f} },
+    { {-0.5f, -0.5f, -0.5f}, {0.25f, 1.0f, 0.25f}, { 0.0f, -1.0f,  0.0f}, {0.0f, 0.0f} },
+    { { 0.5f, -0.5f, -0.5f}, {0.25f, 1.0f, 0.25f}, { 0.0f, -1.0f,  0.0f}, {1.0f, 0.0f} },
+    { { 0.5f, -0.5f,  0.5f}, {0.25f, 1.0f, 0.25f}, { 0.0f, -1.0f,  0.0f}, {1.0f, 1.0f} },
+    { {-0.5f, -0.5f,  0.5f}, {0.25f, 1.0f, 0.25f}, { 0.0f, -1.0f,  0.0f}, {0.0f, 1.0f} },
 
     // Bottom face (Y = +0.5) - Magenta
-    { {-0.5f,  0.5f,  0.5f}, {1.0f, 0.25f, 1.0f}, { 0.0f,  1.0f,  0.0f} },
-    { { 0.5f,  0.5f,  0.5f}, {1.0f, 0.25f, 1.0f}, { 0.0f,  1.0f,  0.0f} },
-    { { 0.5f,  0.5f, -0.5f}, {1.0f, 0.25f, 1.0f}, { 0.0f,  1.0f,  0.0f} },
-    { {-0.5f,  0.5f, -0.5f}, {1.0f, 0.25f, 1.0f}, { 0.0f,  1.0f,  0.0f} },
+    { {-0.5f,  0.5f,  0.5f}, {1.0f, 0.25f, 1.0f}, { 0.0f,  1.0f,  0.0f}, {0.0f, 0.0f} },
+    { { 0.5f,  0.5f,  0.5f}, {1.0f, 0.25f, 1.0f}, { 0.0f,  1.0f,  0.0f}, {1.0f, 0.0f} },
+    { { 0.5f,  0.5f, -0.5f}, {1.0f, 0.25f, 1.0f}, { 0.0f,  1.0f,  0.0f}, {1.0f, 1.0f} },
+    { {-0.5f,  0.5f, -0.5f}, {1.0f, 0.25f, 1.0f}, { 0.0f,  1.0f,  0.0f}, {0.0f, 1.0f} },
 
     // Right face (X = +0.5) - Blue
-    { { 0.5f, -0.5f,  0.5f}, {0.25f, 0.5f, 1.0f}, { 1.0f,  0.0f,  0.0f} },
-    { { 0.5f, -0.5f, -0.5f}, {0.25f, 0.5f, 1.0f}, { 1.0f,  0.0f,  0.0f} },
-    { { 0.5f,  0.5f, -0.5f}, {0.25f, 0.5f, 1.0f}, { 1.0f,  0.0f,  0.0f} },
-    { { 0.5f,  0.5f,  0.5f}, {0.25f, 0.5f, 1.0f}, { 1.0f,  0.0f,  0.0f} },
+    { { 0.5f, -0.5f,  0.5f}, {0.25f, 0.5f, 1.0f}, { 1.0f,  0.0f,  0.0f}, {0.0f, 0.0f} },
+    { { 0.5f, -0.5f, -0.5f}, {0.25f, 0.5f, 1.0f}, { 1.0f,  0.0f,  0.0f}, {1.0f, 0.0f} },
+    { { 0.5f,  0.5f, -0.5f}, {0.25f, 0.5f, 1.0f}, { 1.0f,  0.0f,  0.0f}, {1.0f, 1.0f} },
+    { { 0.5f,  0.5f,  0.5f}, {0.25f, 0.5f, 1.0f}, { 1.0f,  0.0f,  0.0f}, {0.0f, 1.0f} },
 
     // Left face (X = -0.5) - Yellow
-    { {-0.5f, -0.5f, -0.5f}, {1.0f, 1.0f, 0.25f}, {-1.0f,  0.0f,  0.0f} },
-    { {-0.5f, -0.5f,  0.5f}, {1.0f, 1.0f, 0.25f}, {-1.0f,  0.0f,  0.0f} },
-    { {-0.5f,  0.5f,  0.5f}, {1.0f, 1.0f, 0.25f}, {-1.0f,  0.0f,  0.0f} },
-    { {-0.5f,  0.5f, -0.5f}, {1.0f, 1.0f, 0.25f}, {-1.0f,  0.0f,  0.0f} },
+    { {-0.5f, -0.5f, -0.5f}, {1.0f, 1.0f, 0.25f}, {-1.0f,  0.0f,  0.0f}, {0.0f, 0.0f} },
+    { {-0.5f, -0.5f,  0.5f}, {1.0f, 1.0f, 0.25f}, {-1.0f,  0.0f,  0.0f}, {1.0f, 0.0f} },
+    { {-0.5f,  0.5f,  0.5f}, {1.0f, 1.0f, 0.25f}, {-1.0f,  0.0f,  0.0f}, {1.0f, 1.0f} },
+    { {-0.5f,  0.5f, -0.5f}, {1.0f, 1.0f, 0.25f}, {-1.0f,  0.0f,  0.0f}, {0.0f, 1.0f} },
 };
 
 const std::vector<uint16_t> CUBE_INDICES = {
@@ -57,6 +57,7 @@ struct Vertex {
     float3 position;
     float3 color;
     float3 normal;
+    float2 uv;
 };
 
 struct SceneData {
@@ -87,10 +88,14 @@ struct PushConstants {
 };
 [[vk::push_constant]] PushConstants pc;
 
+// Sampled texture binding reflected automatically by Slang
+[[vk::binding(0, 0)]] Sampler2D u_texture;
+
 struct VertexOutput {
     float4 position : SV_Position;
     float3 color : COLOR;
     float3 normal : NORMAL;
+    float2 uv : TEXCOORD;
 };
 
 [shader("vertex")]
@@ -107,23 +112,29 @@ VertexOutput vsMain(uint indexID : SV_VertexID) {
     output.position = mul(worldPos, scene->view_proj);
     output.color    = input.color * scene->tint;
     output.normal   = normalize(mul(input.normal, (float3x3)scene->model));
+    output.uv       = input.uv;
     return output;
 }
 
 [shader("fragment")]
 float4 fsMain(VertexOutput input) : SV_Target {
     SceneData* scene = (SceneData*)pc.sceneDataAddress;
+
+    // Sample texture
+    float4 texColor = u_texture.Sample(input.uv);
+
+    // Directional lighting
     float3 lightDir = normalize(scene->light_dir);
     float diff = max(dot(input.normal, lightDir), 0.0);
-    float3 ambient = scene->ambient_intensity * input.color;
-    float3 diffuse = diff * input.color * scene->light_color;
+    float3 ambient = scene->ambient_intensity * texColor.rgb * input.color;
+    float3 diffuse = diff * texColor.rgb * input.color * scene->light_color;
     return float4(ambient + diffuse, 1.0);
 }
 )";
 
 int main() {
     try {
-        codotaku::Application app("Codotaku Engine Demo (GBuffer + GPU-Driven Indirect BDA)");
+        codotaku::Application app("Codotaku Engine Demo (Textures + GBuffer + Indirect BDA)");
 
         // 1. Upload Mesh to Static Geometry Arena
         auto mesh = app.upload_mesh(CUBE_VERTICES, CUBE_INDICES);
@@ -136,64 +147,46 @@ int main() {
             .firstInstance = 0,
         });
 
-        // 3. Compile Slang Shader & Create Dynamic Rendering Pipeline
+        // 3. Compile Slang Shader & Create Dynamic Rendering Pipeline (with reflected texture descriptor layout!)
         auto pipeline = app.create_pipeline(SHADER_SLANG_CODE);
 
-        // 4. Create 3D Camera
+        // 4. Create Procedural Textures & Descriptor Sets
+        auto checkerboard_tex = codotaku::Texture::create_checkerboard(app.get_vulkan(), 256, 256, 32);
+        auto grid_tex = codotaku::Texture::create_grid_pattern(app.get_vulkan(), 256, 256);
+
+        VkDescriptorSet checkerboard_desc_set = pipeline.create_texture_descriptor_set(checkerboard_tex, 0, 0);
+        VkDescriptorSet grid_desc_set = pipeline.create_texture_descriptor_set(grid_tex, 0, 0);
+
+        // 5. Create 3D Camera
         codotaku::Camera camera({0.0f, 1.4f, 3.2f}, {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, 45.0f);
 
-        // 5. GBuffer Abstraction: Allocate N images with particular properties
+        // 6. GBuffer Abstraction
         codotaku::GBuffer gbuffer(app.get_vulkan(), 800, 600);
-
-        // Add HDR Albedo attachment
         uint32_t albedo_id = gbuffer.add_attachment({
             .name = "hdr_albedo",
             .format = VK_FORMAT_R16G16B16A16_SFLOAT,
             .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
         });
-
-        // Add Normal/Velocity attachment
-        uint32_t normal_id = gbuffer.add_attachment({
-            .name = "normal_buffer",
-            .format = VK_FORMAT_R16G16_SFLOAT,
-            .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-        });
-
-        // Add Depth attachment
         uint32_t depth_id = gbuffer.add_attachment({
             .name = "depth_buffer",
             .format = VK_FORMAT_D32_SFLOAT,
             .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
         });
 
-        std::println("[Main] GBuffer initialized with {} active attachments (Albedo: {}, Normal: {}, Depth: {})",
-            gbuffer.get_active_count(), albedo_id, normal_id, depth_id);
-
-        // Demonstrate deleting an attachment dynamically
-        gbuffer.remove_attachment(normal_id);
-        std::println("[Main] After dynamic deletion, GBuffer active attachments: {}", gbuffer.get_active_count());
-
-        // 6. Configure Application Window Close Policy
+        // 7. Spawn Windows with configurable Buffer Count, VSync mode, and Close Callbacks
         app.set_close_policy(codotaku::WindowClosePolicy::QuitOnLastWindowClose);
 
-        // Spawn Windows with configurable Buffer Count, VSync mode, and Close Callbacks
         app.create_window({
-            .title = "Window 1 (Primary, Triple Buffer, VSync ON, Cyan)",
+            .title = "Window 1 (Checkerboard Texture - Triple Buffer)",
             .width = 800,
             .height = 600,
             .buffer_count = 3,
             .present_mode = codotaku::PresentMode::Fifo,
-            .format_selector = [](std::span<const codotaku::ColorFormat> available) {
-                for (const auto& fmt : available) {
-                    if (fmt.vk_format == VK_FORMAT_B8G8R8A8_UNORM) return fmt;
-                }
-                return available.front();
-            },
             .is_primary = true,
         });
 
         app.create_window({
-            .title = "Window 2 (Double Buffer, Immediate, Gold)",
+            .title = "Window 2 (Grid Texture - Double Buffer, Uncapped)",
             .width = 600,
             .height = 600,
             .buffer_count = 2,
@@ -201,20 +194,20 @@ int main() {
         });
 
         app.create_window({
-            .title = "Window 3 (Triple Buffer, VSync ON, Purple)",
+            .title = "Window 3 (Checkerboard Texture - Custom Close Hook)",
             .width = 500,
             .height = 500,
             .buffer_count = 3,
             .present_mode = codotaku::PresentMode::Fifo,
             .on_close = [](codotaku::Window& win) {
-                std::println("[Custom Hook] Window '{}' intercepting close event.", win.get_title());
-                return true; // Return true to allow closing
+                std::println("[Custom Hook] Window '{}' close requested, accepting.", win.get_title());
+                return true;
             },
         });
 
         auto start_time = std::chrono::steady_clock::now();
 
-        // 7. Transparent, Non-intrusive Render Loop (User controls command recording & submission!)
+        // 8. Transparent, Non-intrusive Render Loop
         int ret = app.run([&](codotaku::Window& window, codotaku::FrameContext& frame) {
             auto now = std::chrono::steady_clock::now();
             float time_sec = std::chrono::duration<float>(now - start_time).count();
@@ -224,7 +217,7 @@ int main() {
                 gbuffer.resize_all(frame.width, frame.height);
             }
 
-            // Set camera aspect ratio matching the active window
+            // Set camera aspect ratio matching active window
             camera.set_aspect_ratio(frame.aspect_ratio);
 
             // Compute 3D Model transformation
@@ -245,13 +238,11 @@ int main() {
             scene->camera_pos = camera.get_position();
             scene->time = time_sec;
             scene->light_dir = glm::vec3(0.5f, 0.8f, 0.7f);
-            scene->ambient_intensity = 0.3f;
+            scene->ambient_intensity = 0.35f;
             scene->light_color = glm::vec3(1.0f, 1.0f, 1.0f);
-            scene->tint = (window.get_title().find("Gold") != std::string::npos)
-                              ? glm::vec3(1.0f, 0.75f, 0.3f)
-                              : ((window.get_title().find("Purple") != std::string::npos)
-                                     ? glm::vec3(1.0f, 0.4f, 1.0f)
-                                     : glm::vec3(0.4f, 1.0f, 1.0f));
+            scene->tint = (window.get_title().find("Grid") != std::string::npos)
+                              ? glm::vec3(1.0f, 0.8f, 0.4f)
+                              : glm::vec3(1.0f, 1.0f, 1.0f);
             scene->vertexBufferAddress = mesh.vertex_address;
             scene->indexBufferAddress = mesh.index_address;
             scene->indirectCommandsAddress = indirect_batch.device_address;
@@ -262,7 +253,19 @@ int main() {
 
             vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.get_pipeline());
 
-            // Push the 8-byte 64-bit Root Scene BDA address
+            // Bind window texture descriptor set (Grid vs Checkerboard)
+            VkDescriptorSet active_desc_set = (window.get_title().find("Grid") != std::string::npos)
+                                                  ? grid_desc_set
+                                                  : checkerboard_desc_set;
+            vkCmdBindDescriptorSets(
+                frame.cmd,
+                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                pipeline.get_layout(),
+                0, 1,
+                &active_desc_set,
+                0, nullptr);
+
+            // Push 8-byte Root Scene BDA address
             uint64_t scene_addr = scene_suballoc.device_address;
             vkCmdPushConstants(
                 frame.cmd,
@@ -283,6 +286,8 @@ int main() {
             frame.end_rendering();
         });
 
+        checkerboard_tex.cleanup();
+        grid_tex.cleanup();
         gbuffer.cleanup();
         pipeline.cleanup();
         return ret;

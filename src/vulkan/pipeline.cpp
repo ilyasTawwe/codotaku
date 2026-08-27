@@ -12,7 +12,9 @@ Pipeline::~Pipeline() {
 Pipeline::Pipeline(Pipeline&& other) noexcept
     : m_device(std::exchange(other.m_device, VK_NULL_HANDLE)),
       m_pipeline(std::exchange(other.m_pipeline, VK_NULL_HANDLE)),
-      m_layout(std::exchange(other.m_layout, VK_NULL_HANDLE)) {}
+      m_layout(std::exchange(other.m_layout, VK_NULL_HANDLE)),
+      m_set_layouts(std::move(other.m_set_layouts)),
+      m_descriptor_pool(std::exchange(other.m_descriptor_pool, VK_NULL_HANDLE)) {}
 
 Pipeline& Pipeline::operator=(Pipeline&& other) noexcept {
     if (this != &other) {
@@ -20,6 +22,8 @@ Pipeline& Pipeline::operator=(Pipeline&& other) noexcept {
         m_device = std::exchange(other.m_device, VK_NULL_HANDLE);
         m_pipeline = std::exchange(other.m_pipeline, VK_NULL_HANDLE);
         m_layout = std::exchange(other.m_layout, VK_NULL_HANDLE);
+        m_set_layouts = std::move(other.m_set_layouts);
+        m_descriptor_pool = std::exchange(other.m_descriptor_pool, VK_NULL_HANDLE);
     }
     return *this;
 }
@@ -121,9 +125,58 @@ void Pipeline::init_dynamic_rendering_bda(
         .pDynamicStates = dynamic_states,
     };
 
+    // 1. Create Reflected Descriptor Set Layouts
+    for (const auto& [set_idx, bindings] : shaders.reflection.descriptor_sets) {
+        std::vector<VkDescriptorSetLayoutBinding> vk_bindings;
+        for (const auto& b : bindings) {
+            vk_bindings.push_back({
+                .binding = b.binding,
+                .descriptorType = b.descriptor_type,
+                .descriptorCount = 1,
+                .stageFlags = b.stage_flags,
+            });
+        }
+
+        VkDescriptorSetLayoutCreateInfo layout_info{
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            .bindingCount = static_cast<uint32_t>(vk_bindings.size()),
+            .pBindings = vk_bindings.data(),
+        };
+
+        VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
+        if (vkCreateDescriptorSetLayout(m_device, &layout_info, nullptr, &set_layout) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create descriptor set layout");
+        }
+        m_set_layouts.push_back(set_layout);
+    }
+
+    // 2. Create Descriptor Pool if descriptor sets are used
+    if (!m_set_layouts.empty()) {
+        VkDescriptorPoolSize pool_sizes[] = {
+            { .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 32 },
+            { .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 32 },
+            { .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 32 },
+        };
+
+        VkDescriptorPoolCreateInfo pool_info{
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+            .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
+            .maxSets = 32,
+            .poolSizeCount = 3,
+            .pPoolSizes = pool_sizes,
+        };
+
+        if (vkCreateDescriptorPool(m_device, &pool_info, nullptr, &m_descriptor_pool) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create pipeline descriptor pool");
+        }
+    }
+
+    // 3. Create Pipeline Layout with Reflected Push Constants & Set Layouts
     const auto& push_constants = shaders.reflection.push_constants;
     VkPipelineLayoutCreateInfo pipeline_layout_info{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount = static_cast<uint32_t>(m_set_layouts.size()),
+        .pSetLayouts = m_set_layouts.data(),
         .pushConstantRangeCount = static_cast<uint32_t>(push_constants.size()),
         .pPushConstantRanges = push_constants.data(),
     };
@@ -166,9 +219,63 @@ void Pipeline::init_dynamic_rendering_bda(
     vkDestroyShaderModule(m_device, vs_module, nullptr);
 }
 
+VkDescriptorSetLayout Pipeline::get_descriptor_set_layout(uint32_t set_index) const {
+    if (set_index >= m_set_layouts.size()) {
+        throw std::runtime_error("Descriptor set index out of bounds");
+    }
+    return m_set_layouts[set_index];
+}
+
+VkDescriptorSet Pipeline::create_texture_descriptor_set(const Texture& texture, uint32_t set_index, uint32_t binding_index) const {
+    if (m_descriptor_pool == VK_NULL_HANDLE || set_index >= m_set_layouts.size()) {
+        throw std::runtime_error("Cannot allocate descriptor set: no layout or pool available");
+    }
+
+    VkDescriptorSetLayout set_layout = m_set_layouts[set_index];
+    VkDescriptorSetAllocateInfo alloc_info{
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool = m_descriptor_pool,
+        .descriptorSetCount = 1,
+        .pSetLayouts = &set_layout,
+    };
+
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    if (vkAllocateDescriptorSets(m_device, &alloc_info, &set) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to allocate descriptor set for texture");
+    }
+
+    VkDescriptorImageInfo image_info = texture.get_descriptor_image_info();
+
+    VkWriteDescriptorSet write{
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet = set,
+        .dstBinding = binding_index,
+        .dstArrayElement = 0,
+        .descriptorCount = 1,
+        .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .pImageInfo = &image_info,
+    };
+
+    vkUpdateDescriptorSets(m_device, 1, &write, 0, nullptr);
+    return set;
+}
+
 void Pipeline::cleanup() {
     if (m_device != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(m_device);
+
+        if (m_descriptor_pool != VK_NULL_HANDLE) {
+            vkDestroyDescriptorPool(m_device, m_descriptor_pool, nullptr);
+            m_descriptor_pool = VK_NULL_HANDLE;
+        }
+
+        for (auto layout : m_set_layouts) {
+            if (layout != VK_NULL_HANDLE) {
+                vkDestroyDescriptorSetLayout(m_device, layout, nullptr);
+            }
+        }
+        m_set_layouts.clear();
+
         if (m_pipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(m_device, m_pipeline, nullptr);
             m_pipeline = VK_NULL_HANDLE;

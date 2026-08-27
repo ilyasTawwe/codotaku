@@ -8,6 +8,7 @@
 #include <codotaku/vulkan/context.hpp>
 #include <codotaku/vulkan/arena.hpp>
 #include <codotaku/vulkan/sync.hpp>
+#include <codotaku/vulkan/texture.hpp>
 #include <codotaku/vulkan/gbuffer.hpp>
 #include <codotaku/vulkan/indirect.hpp>
 #include <codotaku/vulkan/pipeline.hpp>

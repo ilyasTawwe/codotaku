@@ -32,6 +32,9 @@ Inspired by modern Linux presentation paradigms (such as NVIDIA's `egl-wayland2`
   - **Static Geometry Arena**: 4 MB contiguous VRAM buffer managing suballocations for vertex/index geometry and indirect draw commands.
   - **Dynamic Frame Arena**: 64 KB host-mapped ring buffer for per-frame scene/transform data.
   - Compact **8-byte push constants** (`uint64_t sceneDataAddress`).
+- **Texture Management & Slang Texture Sampling**:
+  - `codotaku::Texture`: Loads RGBA8 pixel buffers or procedural patterns (checkerboard, grid) via VMA staging buffers with Synchronization 2 uploads.
+  - Full anisotropic sampler creation and automatic Slang descriptor set reflection (`[[vk::binding(0, 0)]] Sampler2D`).
 - **Dynamic GBuffer & RenderTarget Pool Abstraction**:
   - Dynamically allocate $N$ images with arbitrary formats, usages, dimensions, and sample counts.
   - Recreates all attachments in bulk with `gbuffer.resize_all(w, h)` or individually with `gbuffer.resize(id, w, h)`.
@@ -73,6 +76,7 @@ codotaku/
 │       │   ├── context.hpp                # Vulkan 1.4 context, Volk, VMA, DRM node
 │       │   ├── arena.hpp                  # GpuBufferArena (VmaVirtualBlock suballocations)
 │       │   ├── sync.hpp                   # DRM syncobj timeline explicit synchronization
+│       │   ├── texture.hpp                # 2D Texture & procedural texture generators
 │       │   ├── gbuffer.hpp                # GBuffer & dynamic render target pool
 │       │   ├── indirect.hpp               # Indirect draw command batch helper
 │       │   └── pipeline.hpp               # Dynamic rendering BDA graphics pipeline
