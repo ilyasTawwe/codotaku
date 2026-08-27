@@ -103,18 +103,25 @@ const std::vector<uint16_t> CUBE_INDICES = {
     20, 21, 22,  22, 23, 20  // Left
 };
 
-const char* CUBE_SLANG_CODE = R"(
-struct VertexInput {
-    float3 position : POSITION;
-    float3 color : COLOR;
-    float3 normal : NORMAL;
+const char* CUBE_SLANG_BDA_CODE = R"(
+struct Vertex {
+    float3 position;
+    float3 color;
+    float3 normal;
 };
 
-struct PushConstants {
+struct SceneData {
     float4x4 mvp;
     float4x4 model;
     float3 tint;
     float _pad;
+    uint64_t vertexBufferAddress;
+    uint64_t indexBufferAddress;
+};
+
+// 8-byte 64-bit Root Buffer GPU pointer
+struct PushConstants {
+    uint64_t sceneDataAddress;
 };
 [[vk::push_constant]] PushConstants pc;
 
@@ -125,12 +132,21 @@ struct VertexOutput {
 };
 
 [shader("vertex")]
-VertexOutput vsMain(VertexInput input) {
+VertexOutput vsMain(uint indexID : SV_VertexID) {
+    // 1. Dereference Root Scene Data buffer via BDA
+    SceneData* scene = (SceneData*)pc.sceneDataAddress;
+
+    // 2. Dereference Index & Vertex buffers via BDA
+    uint16_t* indices = (uint16_t*)scene.indexBufferAddress;
+    Vertex* vertices  = (Vertex*)scene.vertexBufferAddress;
+
+    uint vertexIndex = indices[indexID];
+    Vertex input     = vertices[vertexIndex];
+
     VertexOutput output;
-    // Multiplied in column-major order to match GLM memory layout
-    output.position = mul(float4(input.position, 1.0), pc.mvp);
-    output.color = input.color * pc.tint;
-    output.normal = normalize(mul(input.normal, (float3x3)pc.model));
+    output.position = mul(float4(input.position, 1.0), scene.mvp);
+    output.color    = input.color * scene.tint;
+    output.normal   = normalize(mul(input.normal, (float3x3)scene.model));
     return output;
 }
 
@@ -143,6 +159,15 @@ float4 fsMain(VertexOutput input) : SV_Target {
     return float4(ambient + diffuse, 1.0);
 }
 )";
+
+struct SceneData {
+    glm::mat4 mvp;
+    glm::mat4 model;
+    glm::vec3 tint;
+    float _pad{0.0f};
+    uint64_t vertexBufferAddress{0};
+    uint64_t indexBufferAddress{0};
+};
 
 struct WaylandContext {
     wl_display* display{nullptr};
@@ -180,6 +205,8 @@ struct DepthBuffer {
 struct BufferResource {
     VkBuffer buffer{VK_NULL_HANDLE};
     VmaAllocation allocation{VK_NULL_HANDLE};
+    VkDeviceAddress device_address{0};
+    void* mapped_data{nullptr};
 };
 
 struct VulkanContext {
@@ -199,6 +226,14 @@ struct VulkanContext {
     VkPipelineLayout pipeline_layout{VK_NULL_HANDLE};
     VkPipeline pipeline{VK_NULL_HANDLE};
 };
+
+VkDeviceAddress get_buffer_address(VkDevice device, VkBuffer buffer) {
+    VkBufferDeviceAddressInfo info{
+        .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
+        .buffer = buffer,
+    };
+    return vkGetBufferDeviceAddress(device, &info);
+}
 
 uint32_t find_memory_type(const VkPhysicalDeviceMemoryProperties& mem_props, uint32_t type_filter, VkMemoryPropertyFlags properties) {
     for (uint32_t i = 0; i < mem_props.memoryTypeCount; ++i) {
@@ -246,6 +281,7 @@ public:
         init_drm_syncobj_timelines(wl, vk);
         create_dmabuf_buffers(wl, vk);
         create_depth_buffer(vk);
+        create_scene_buffers(vk);
         create_command_resources(vk);
     }
 
@@ -270,6 +306,7 @@ public:
                 m_command_pool = VK_NULL_HANDLE;
             }
 
+            cleanup_scene_buffers(vk);
             cleanup_depth_buffer(vk);
             cleanup_dmabuf_buffers(vk);
 
@@ -388,7 +425,7 @@ public:
             .layerCount = 1,
         };
 
-        // Synchronization 2: Transition Color to COLOR_ATTACHMENT_OPTIMAL and Depth to DEPTH_ATTACHMENT_OPTIMAL
+        // Synchronization 2: Transition Color and Depth attachments
         VkImageMemoryBarrier2 barriers[2] = {
             {
                 .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
@@ -426,7 +463,7 @@ public:
 
         vkCmdPipelineBarrier2(cmd, &dep_pre_render);
 
-        // Dynamic Rendering pass with Color & Depth attachments
+        // Dynamic Rendering pass
         VkRenderingAttachmentInfo color_attachment{
             .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
             .imageView = buf.view,
@@ -465,15 +502,15 @@ public:
 
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.pipeline);
 
-        // Compute 3D Matrices with GLM
+        // 3D Matrix Computation
         float aspect = (m_height > 0) ? (static_cast<float>(m_width) / static_cast<float>(m_height)) : 1.0f;
         glm::mat4 proj = glm::perspective(glm::radians(45.0f), aspect, 0.1f, 100.0f);
-        proj[1][1] *= -1.0f; // Invert Y for Vulkan viewport coordinate convention
+        proj[1][1] *= -1.0f;
 
         glm::mat4 view = glm::lookAt(
-            glm::vec3(0.0f, 1.0f, 2.4f), // Eye
-            glm::vec3(0.0f, 0.0f, 0.0f), // Center
-            glm::vec3(0.0f, 1.0f, 0.0f)  // Up
+            glm::vec3(0.0f, 1.2f, 2.8f),
+            glm::vec3(0.0f, 0.0f, 0.0f),
+            glm::vec3(0.0f, 1.0f, 0.0f)
         );
 
         glm::mat4 model = glm::mat4(1.0f);
@@ -483,16 +520,22 @@ public:
 
         glm::mat4 mvp = proj * view * model;
 
-        struct ShaderPushConstants {
-            glm::mat4 mvp;
-            glm::mat4 model;
-            glm::vec3 tint;
-            float _pad;
-        } pc = {
+        // 1. Update Mapped SceneData Root Buffer
+        SceneData scene_data{
             .mvp = mvp,
             .model = model,
             .tint = m_tint,
             ._pad = 0.0f,
+            .vertexBufferAddress = vk.vertex_buffer.device_address,
+            .indexBufferAddress = vk.index_buffer.device_address,
+        };
+        std::memcpy(m_scene_buffers[m_current_buffer_idx].mapped_data, &scene_data, sizeof(SceneData));
+
+        // 2. Push only 8-byte 64-bit Root Buffer GPU address!
+        struct ShaderPushConstants {
+            uint64_t sceneDataAddress;
+        } pc = {
+            .sceneDataAddress = m_scene_buffers[m_current_buffer_idx].device_address,
         };
 
         vkCmdPushConstants(
@@ -519,15 +562,12 @@ public:
         };
         vkCmdSetScissor(cmd, 0, 1, &scissor);
 
-        VkDeviceSize offsets[] = {0};
-        vkCmdBindVertexBuffers(cmd, 0, 1, &vk.vertex_buffer.buffer, offsets);
-        vkCmdBindIndexBuffer(cmd, vk.index_buffer.buffer, 0, VK_INDEX_TYPE_UINT16);
-
-        vkCmdDrawIndexed(cmd, static_cast<uint32_t>(CUBE_INDICES.size()), 1, 0, 0, 0);
+        // 3. 100% Bindless Draw! (Vertices and indices are pulled directly in shader via BDA)
+        vkCmdDraw(cmd, static_cast<uint32_t>(CUBE_INDICES.size()), 1, 0, 0);
 
         vkCmdEndRendering(cmd);
 
-        // Synchronization 2: Transition Color from COLOR_ATTACHMENT_OPTIMAL to GENERAL
+        // Synchronization 2: Transition Color to GENERAL
         VkImageMemoryBarrier2 barrier_to_general{
             .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
             .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -610,6 +650,8 @@ private:
     void cleanup_dmabuf_buffers(VulkanContext& vk);
     void create_depth_buffer(VulkanContext& vk);
     void cleanup_depth_buffer(VulkanContext& vk);
+    void create_scene_buffers(VulkanContext& vk);
+    void cleanup_scene_buffers(VulkanContext& vk);
     void recreate_buffers(WaylandContext& wl, VulkanContext& vk);
     void create_command_resources(VulkanContext& vk);
 
@@ -634,6 +676,7 @@ private:
 
     std::vector<DmaBufBuffer> m_buffers;
     DepthBuffer m_depth{};
+    std::vector<BufferResource> m_scene_buffers;
     size_t m_current_buffer_idx{0};
 
     VkCommandPool m_command_pool{VK_NULL_HANDLE};
@@ -1026,6 +1069,41 @@ void AppWindow::cleanup_depth_buffer(VulkanContext& vk) {
     }
 }
 
+void AppWindow::create_scene_buffers(VulkanContext& vk) {
+    m_scene_buffers.resize(BUFFER_POOL_SIZE);
+    VkBufferCreateInfo buffer_info{
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = sizeof(SceneData),
+        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+    };
+
+    VmaAllocationCreateInfo alloc_info{
+        .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT,
+        .usage = VMA_MEMORY_USAGE_AUTO,
+    };
+
+    for (size_t i = 0; i < BUFFER_POOL_SIZE; ++i) {
+        VmaAllocationInfo allocation_info{};
+        if (vmaCreateBuffer(vk.allocator, &buffer_info, &alloc_info, &m_scene_buffers[i].buffer, &m_scene_buffers[i].allocation, &allocation_info) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to allocate SceneData root buffer via VMA");
+        }
+        m_scene_buffers[i].mapped_data = allocation_info.pMappedData;
+        m_scene_buffers[i].device_address = get_buffer_address(vk.device, m_scene_buffers[i].buffer);
+    }
+}
+
+void AppWindow::cleanup_scene_buffers(VulkanContext& vk) {
+    for (auto& buf : m_scene_buffers) {
+        if (buf.buffer != VK_NULL_HANDLE) {
+            vmaDestroyBuffer(vk.allocator, buf.buffer, buf.allocation);
+            buf.buffer = VK_NULL_HANDLE;
+            buf.allocation = VK_NULL_HANDLE;
+        }
+    }
+    m_scene_buffers.clear();
+}
+
 void AppWindow::cleanup_dmabuf_buffers(VulkanContext& vk) {
     for (auto& buf : m_buffers) {
         if (buf.wbuffer) {
@@ -1131,7 +1209,7 @@ void init_vulkan_context(VulkanContext& vk) {
 
     VkApplicationInfo app_info{
         .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
-        .pApplicationName = "Vulkan 3D Cube Multi-Window App",
+        .pApplicationName = "Vulkan 3D Cube Multi-Window App (BDA Vertex Pulling)",
         .applicationVersion = VK_MAKE_VERSION(1, 0, 0),
         .pEngineName = "No Engine",
         .engineVersion = VK_MAKE_VERSION(1, 0, 0),
@@ -1236,7 +1314,7 @@ void init_vulkan_context(VulkanContext& vk) {
     vkGetPhysicalDeviceProperties(vk.physical_device, &props);
     std::println("Using GPU: {}", props.deviceName);
 
-    // Create Logical Device
+    // Create Logical Device with Buffer Device Address, Synchronization 2, and Dynamic Rendering
     float queue_priority = 1.0f;
     VkDeviceQueueCreateInfo queue_create_info{
         .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
@@ -1252,10 +1330,26 @@ void init_vulkan_context(VulkanContext& vk) {
         VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME,
     };
 
-    VkPhysicalDeviceFeatures features{};
+    VkPhysicalDeviceFeatures features{
+        .shaderInt64 = VK_TRUE,
+        .shaderInt16 = VK_TRUE,
+    };
+
+    VkPhysicalDeviceVulkan11Features vulkan11_features{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
+        .shaderDrawParameters = VK_TRUE,
+    };
+
+    VkPhysicalDeviceVulkan12Features vulkan12_features{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+        .pNext = &vulkan11_features,
+        .scalarBlockLayout = VK_TRUE,
+        .bufferDeviceAddress = VK_TRUE,
+    };
 
     VkPhysicalDeviceVulkan13Features vulkan13_features{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+        .pNext = &vulkan12_features,
         .synchronization2 = VK_TRUE,
         .dynamicRendering = VK_TRUE,
     };
@@ -1271,16 +1365,16 @@ void init_vulkan_context(VulkanContext& vk) {
     };
 
     if (vkCreateDevice(vk.physical_device, &device_create_info, nullptr, &vk.device) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create Vulkan logical device");
+        throw std::runtime_error("Failed to create Vulkan logical device with Buffer Device Address");
     }
 
     volkLoadDevice(vk.device);
     vkGetDeviceQueue(vk.device, vk.queue_family_index, 0, &vk.queue);
 
-    // Initialize VMA
+    // Initialize VMA with Buffer Device Address support
     VmaVulkanFunctions vulkan_functions{};
     VmaAllocatorCreateInfo allocator_info{
-        .flags = 0,
+        .flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT,
         .physicalDevice = vk.physical_device,
         .device = vk.device,
         .instance = vk.instance,
@@ -1296,7 +1390,7 @@ void init_vulkan_context(VulkanContext& vk) {
     if (vmaCreateAllocator(&allocator_info, &vk.allocator) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create Vulkan Memory Allocator (VMA)");
     }
-    std::println("VMA initialized with Volk successfully.");
+    std::println("VMA initialized with Volk and Buffer Device Address successfully.");
 
     // Open DRM Node
     vk.drm_fd = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
@@ -1309,11 +1403,11 @@ void init_vulkan_context(VulkanContext& vk) {
 }
 
 void create_shared_mesh_buffers(VulkanContext& vk) {
-    // 1. Vertex Buffer
+    // 1. Vertex Buffer (Storage Buffer with BDA)
     VkBufferCreateInfo vb_info{
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .size = sizeof(Vertex) * CUBE_VERTICES.size(),
-        .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
     };
 
@@ -1327,12 +1421,13 @@ void create_shared_mesh_buffers(VulkanContext& vk) {
         throw std::runtime_error("Failed to create 3D cube vertex buffer with VMA");
     }
     std::memcpy(vb_alloc_info.pMappedData, CUBE_VERTICES.data(), sizeof(Vertex) * CUBE_VERTICES.size());
+    vk.vertex_buffer.device_address = get_buffer_address(vk.device, vk.vertex_buffer.buffer);
 
-    // 2. Index Buffer
+    // 2. Index Buffer (Storage Buffer with BDA)
     VkBufferCreateInfo ib_info{
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .size = sizeof(uint16_t) * CUBE_INDICES.size(),
-        .usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
     };
 
@@ -1341,51 +1436,11 @@ void create_shared_mesh_buffers(VulkanContext& vk) {
         throw std::runtime_error("Failed to create 3D cube index buffer with VMA");
     }
     std::memcpy(ib_alloc_info.pMappedData, CUBE_INDICES.data(), sizeof(uint16_t) * CUBE_INDICES.size());
+    vk.index_buffer.device_address = get_buffer_address(vk.device, vk.index_buffer.buffer);
 
-    std::println("Created shared 3D cube mesh ({} vertices, {} indices)", CUBE_VERTICES.size(), CUBE_INDICES.size());
+    std::println("Created shared 3D cube mesh (VB Address: {:#x}, IB Address: {:#x})",
+        vk.vertex_buffer.device_address, vk.index_buffer.device_address);
 }
-
-uint32_t get_vk_format_size(VkFormat format) {
-    switch (format) {
-        case VK_FORMAT_R32_SFLOAT: case VK_FORMAT_R32_SINT: case VK_FORMAT_R32_UINT: return 4;
-        case VK_FORMAT_R32G32_SFLOAT: case VK_FORMAT_R32G32_SINT: case VK_FORMAT_R32G32_UINT: return 8;
-        case VK_FORMAT_R32G32B32_SFLOAT: case VK_FORMAT_R32G32B32_SINT: case VK_FORMAT_R32G32B32_UINT: return 12;
-        case VK_FORMAT_R32G32B32A32_SFLOAT: case VK_FORMAT_R32G32B32A32_SINT: case VK_FORMAT_R32G32B32A32_UINT: return 16;
-        default: return 0;
-    }
-}
-
-VkFormat slang_type_to_vk_format(slang::TypeReflection* type) {
-    auto kind = type->getKind();
-    if (kind == slang::TypeReflection::Kind::Scalar) {
-        auto scalar = type->getScalarType();
-        if (scalar == slang::TypeReflection::ScalarType::Float32) return VK_FORMAT_R32_SFLOAT;
-        if (scalar == slang::TypeReflection::ScalarType::Int32) return VK_FORMAT_R32_SINT;
-        if (scalar == slang::TypeReflection::ScalarType::UInt32) return VK_FORMAT_R32_UINT;
-    } else if (kind == slang::TypeReflection::Kind::Vector) {
-        auto scalar = type->getScalarType();
-        auto count = type->getElementCount();
-        if (scalar == slang::TypeReflection::ScalarType::Float32) {
-            if (count == 2) return VK_FORMAT_R32G32_SFLOAT;
-            if (count == 3) return VK_FORMAT_R32G32B32_SFLOAT;
-            if (count == 4) return VK_FORMAT_R32G32B32A32_SFLOAT;
-        } else if (scalar == slang::TypeReflection::ScalarType::Int32) {
-            if (count == 2) return VK_FORMAT_R32G32_SINT;
-            if (count == 3) return VK_FORMAT_R32G32B32_SINT;
-            if (count == 4) return VK_FORMAT_R32G32B32A32_SINT;
-        } else if (scalar == slang::TypeReflection::ScalarType::UInt32) {
-            if (count == 2) return VK_FORMAT_R32G32_UINT;
-            if (count == 3) return VK_FORMAT_R32G32B32_UINT;
-            if (count == 4) return VK_FORMAT_R32G32B32A32_UINT;
-        }
-    }
-    return VK_FORMAT_UNDEFINED;
-}
-
-struct ReflectedVertexInput {
-    VkVertexInputBindingDescription binding{};
-    std::vector<VkVertexInputAttributeDescription> attributes;
-};
 
 struct ReflectedPipelineLayoutData {
     std::vector<VkPushConstantRange> push_constants;
@@ -1394,7 +1449,6 @@ struct ReflectedPipelineLayoutData {
 struct CompiledShadersWithReflection {
     std::vector<uint32_t> vs_spirv;
     std::vector<uint32_t> fs_spirv;
-    ReflectedVertexInput vertex_input;
     ReflectedPipelineLayoutData pipeline_layout_data;
 };
 
@@ -1418,7 +1472,7 @@ CompiledShadersWithReflection compile_slang_shader_source(const char* source) {
 
     Slang::ComPtr<slang::IBlob> diagnostic_blob;
     Slang::ComPtr<slang::IModule> module(
-        session->loadModuleFromSourceString("cube_shader", "cube.slang", source, diagnostic_blob.writeRef()));
+        session->loadModuleFromSourceString("cube_bda_shader", "cube_bda.slang", source, diagnostic_blob.writeRef()));
 
     if (!module) {
         std::string err = diagnostic_blob ? static_cast<const char*>(diagnostic_blob->getBufferPointer()) : "Unknown Slang error";
@@ -1456,57 +1510,25 @@ CompiledShadersWithReflection compile_slang_shader_source(const char* source) {
 
     auto layout = linked_program->getLayout();
 
-    // Reflect Vertex Input
-    auto vs_layout = layout->findEntryPointByName("vsMain");
-    if (vs_layout && vs_layout->getParameterCount() > 0) {
-        auto param = vs_layout->getParameterByIndex(0);
-        auto type_layout = param->getTypeLayout();
-        uint32_t current_offset = 0;
-
-        for (unsigned f = 0; f < type_layout->getFieldCount(); ++f) {
-            auto field = type_layout->getFieldByIndex(f);
-            auto location = static_cast<uint32_t>(field->getOffset(slang::ParameterCategory::VaryingInput));
-            auto format = slang_type_to_vk_format(field->getType());
-            auto size = get_vk_format_size(format);
-
-            result.vertex_input.attributes.push_back({
-                .location = location,
-                .binding = 0,
-                .format = format,
-                .offset = current_offset,
-            });
-
-            current_offset += size;
-        }
-
-        result.vertex_input.binding = {
-            .binding = 0,
-            .stride = current_offset,
-            .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
-        };
-    }
-
-    // Reflect Push Constants
+    // Reflect Push Constants (8-byte root buffer pointer)
     for (unsigned i = 0; i < layout->getParameterCount(); ++i) {
         auto param = layout->getParameterByIndex(i);
         if (param->getCategory() == slang::ParameterCategory::PushConstantBuffer) {
-            auto elem_layout = param->getTypeLayout()->getElementTypeLayout();
-            uint32_t size = elem_layout ? static_cast<uint32_t>(elem_layout->getSize(slang::ParameterCategory::Uniform)) : 0;
-            if (size == 0) {
-                auto type_layout = param->getTypeLayout();
-                for (unsigned f = 0; f < type_layout->getFieldCount(); ++f) {
-                    auto field = type_layout->getFieldByIndex(f);
-                    size += get_vk_format_size(slang_type_to_vk_format(field->getType()));
-                }
-            }
+            uint32_t size = sizeof(uint64_t); // 8 bytes for 64-bit BDA pointer
 
             result.pipeline_layout_data.push_constants.push_back({
                 .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                 .offset = 0,
                 .size = size,
             });
+
+            std::println("  [Slang Reflection] Reflected BDA Root Push Constant Range: size={} bytes", size);
         }
     }
+
+    std::println("Slang compiled BDA shaders: VS {} bytes, FS {} bytes",
+        result.vs_spirv.size() * sizeof(uint32_t),
+        result.fs_spirv.size() * sizeof(uint32_t));
 
     return result;
 }
@@ -1525,7 +1547,7 @@ VkShaderModule create_shader_module(VkDevice device, const std::vector<uint32_t>
 }
 
 void create_shared_graphics_pipeline(VulkanContext& vk) {
-    auto compiled_shaders = compile_slang_shader_source(CUBE_SLANG_CODE);
+    auto compiled_shaders = compile_slang_shader_source(CUBE_SLANG_BDA_CODE);
     VkShaderModule vs_module = create_shader_module(vk.device, compiled_shaders.vs_spirv);
     VkShaderModule fs_module = create_shader_module(vk.device, compiled_shaders.fs_spirv);
 
@@ -1544,12 +1566,13 @@ void create_shared_graphics_pipeline(VulkanContext& vk) {
         },
     };
 
+    // Programmable Vertex Pulling: Completely empty vertex input state!
     VkPipelineVertexInputStateCreateInfo vertex_input_info{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-        .vertexBindingDescriptionCount = 1,
-        .pVertexBindingDescriptions = &compiled_shaders.vertex_input.binding,
-        .vertexAttributeDescriptionCount = static_cast<uint32_t>(compiled_shaders.vertex_input.attributes.size()),
-        .pVertexAttributeDescriptions = compiled_shaders.vertex_input.attributes.data(),
+        .vertexBindingDescriptionCount = 0,
+        .pVertexBindingDescriptions = nullptr,
+        .vertexAttributeDescriptionCount = 0,
+        .pVertexAttributeDescriptions = nullptr,
     };
 
     VkPipelineInputAssemblyStateCreateInfo input_assembly{
@@ -1650,12 +1673,12 @@ void create_shared_graphics_pipeline(VulkanContext& vk) {
     };
 
     if (vkCreateGraphicsPipelines(vk.device, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &vk.pipeline) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create graphics pipeline for 3D dynamic rendering");
+        throw std::runtime_error("Failed to create graphics pipeline for 3D dynamic rendering with BDA");
     }
 
     vkDestroyShaderModule(vk.device, fs_module, nullptr);
     vkDestroyShaderModule(vk.device, vs_module, nullptr);
-    std::println("Shared 3D graphics pipeline created via Slang Reflection.");
+    std::println("Shared 3D graphics pipeline created with Programmable Vertex Pulling.");
 }
 
 void cleanup_vulkan_context(VulkanContext& vk) {
@@ -1715,7 +1738,7 @@ int main() {
     std::signal(SIGTERM, signal_handler);
 
     try {
-        std::println("Starting Vulkan 3D Cube Multi-Window Wayland Application (C++26)...");
+        std::println("Starting Vulkan 3D Cube Multi-Window App (Buffer Device Address Vertex Pulling)...");
 
         WaylandContext wl{};
         init_wayland_context(wl);
@@ -1730,17 +1753,17 @@ int main() {
 
         // Window 1: 800x600, fast rotating cube with vibrant cyan/blue tint
         windows.push_back(std::make_unique<AppWindow>(
-            wl, vk, "Window 1 (3D Cube - Cyan/Blue)", 800, 600, 1.4f, glm::vec3(0.5f, 1.0f, 1.0f)));
+            wl, vk, "Window 1 (3D BDA - Cyan)", 800, 600, 1.4f, glm::vec3(0.5f, 1.0f, 1.0f)));
 
         // Window 2: 600x600, reverse rotating cube with warm golden/orange tint
         windows.push_back(std::make_unique<AppWindow>(
-            wl, vk, "Window 2 (3D Cube - Gold/Orange)", 600, 600, -1.0f, glm::vec3(1.0f, 0.75f, 0.3f)));
+            wl, vk, "Window 2 (3D BDA - Gold)", 600, 600, -1.0f, glm::vec3(1.0f, 0.75f, 0.3f)));
 
         // Window 3: 500x500, slow rotating cube with magenta/purple tint
         windows.push_back(std::make_unique<AppWindow>(
-            wl, vk, "Window 3 (3D Cube - Magenta/Purple)", 500, 500, 0.7f, glm::vec3(1.0f, 0.4f, 1.0f)));
+            wl, vk, "Window 3 (3D BDA - Purple)", 500, 500, 0.7f, glm::vec3(1.0f, 0.4f, 1.0f)));
 
-        std::println("Created {} independent 3D Wayland windows. Entering main event loop...", windows.size());
+        std::println("Created {} independent 3D BDA Wayland windows. Entering main event loop...", windows.size());
         std::fflush(stdout);
         auto start_time = std::chrono::steady_clock::now();
 
