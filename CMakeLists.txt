@@ -10,11 +10,25 @@ find_package(VulkanHeaders REQUIRED CONFIG)
 find_package(volk REQUIRED CONFIG)
 find_package(PkgConfig REQUIRED)
 
+include(FetchContent)
+FetchContent_Declare(
+    VulkanMemoryAllocator
+    GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
+    GIT_TAG        v3.4.0
+)
+FetchContent_MakeAvailable(VulkanMemoryAllocator)
+
 pkg_check_modules(WAYLAND REQUIRED IMPORTED_TARGET wayland-client wayland-protocols)
+pkg_check_modules(DRM REQUIRED IMPORTED_TARGET libdrm)
 pkg_get_variable(WAYLAND_SCANNER wayland-scanner wayland_scanner)
 pkg_get_variable(WAYLAND_PROTOCOLS_DIR wayland-protocols pkgdatadir)
 
-# Generate xdg-shell protocol C code and headers
+find_file(VOLK_C NAMES volk.c PATHS /usr/include /usr/local/include)
+if(NOT VOLK_C)
+    message(FATAL_ERROR "volk.c source file not found")
+endif()
+
+# 1. xdg-shell protocol
 set(XDG_SHELL_XML "${WAYLAND_PROTOCOLS_DIR}/stable/xdg-shell/xdg-shell.xml")
 set(XDG_SHELL_HEADER "${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-client-protocol.h")
 set(XDG_SHELL_CODE "${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-protocol.c")
@@ -35,16 +49,57 @@ add_custom_command(
     VERBATIM
 )
 
-find_file(VOLK_C NAMES volk.c PATHS /usr/include /usr/local/include)
-if(NOT VOLK_C)
-    message(FATAL_ERROR "volk.c source file not found")
-endif()
+# 2. linux-dmabuf-v1 protocol
+set(DMABUF_XML "${WAYLAND_PROTOCOLS_DIR}/stable/linux-dmabuf/linux-dmabuf-v1.xml")
+set(DMABUF_HEADER "${CMAKE_CURRENT_BINARY_DIR}/linux-dmabuf-v1-client-protocol.h")
+set(DMABUF_CODE "${CMAKE_CURRENT_BINARY_DIR}/linux-dmabuf-v1-protocol.c")
+
+add_custom_command(
+    OUTPUT "${DMABUF_HEADER}"
+    COMMAND ${WAYLAND_SCANNER} client-header "${DMABUF_XML}" "${DMABUF_HEADER}"
+    DEPENDS "${DMABUF_XML}"
+    COMMENT "Generating linux-dmabuf-v1-client-protocol.h"
+    VERBATIM
+)
+
+add_custom_command(
+    OUTPUT "${DMABUF_CODE}"
+    COMMAND ${WAYLAND_SCANNER} private-code "${DMABUF_XML}" "${DMABUF_CODE}"
+    DEPENDS "${DMABUF_XML}"
+    COMMENT "Generating linux-dmabuf-v1-protocol.c"
+    VERBATIM
+)
+
+# 3. linux-drm-syncobj-v1 protocol
+set(SYNCOBJ_XML "${WAYLAND_PROTOCOLS_DIR}/staging/linux-drm-syncobj/linux-drm-syncobj-v1.xml")
+set(SYNCOBJ_HEADER "${CMAKE_CURRENT_BINARY_DIR}/linux-drm-syncobj-v1-client-protocol.h")
+set(SYNCOBJ_CODE "${CMAKE_CURRENT_BINARY_DIR}/linux-drm-syncobj-v1-protocol.c")
+
+add_custom_command(
+    OUTPUT "${SYNCOBJ_HEADER}"
+    COMMAND ${WAYLAND_SCANNER} client-header "${SYNCOBJ_XML}" "${SYNCOBJ_HEADER}"
+    DEPENDS "${SYNCOBJ_XML}"
+    COMMENT "Generating linux-drm-syncobj-v1-client-protocol.h"
+    VERBATIM
+)
+
+add_custom_command(
+    OUTPUT "${SYNCOBJ_CODE}"
+    COMMAND ${WAYLAND_SCANNER} private-code "${SYNCOBJ_XML}" "${SYNCOBJ_CODE}"
+    DEPENDS "${SYNCOBJ_XML}"
+    COMMENT "Generating linux-drm-syncobj-v1-protocol.c"
+    VERBATIM
+)
 
 add_executable(codotaku
     main.cpp
     "${VOLK_C}"
     "${XDG_SHELL_HEADER}"
     "${XDG_SHELL_CODE}"
+    "${DMABUF_HEADER}"
+    "${DMABUF_CODE}"
+    "${SYNCOBJ_HEADER}"
+    "${SYNCOBJ_CODE}"
 )
 
 target_include_directories(codotaku PRIVATE
@@ -55,8 +110,14 @@ target_compile_definitions(codotaku PRIVATE
     VK_USE_PLATFORM_WAYLAND_KHR
 )
 
+target_compile_options(codotaku PRIVATE
+    -Wno-nullability-completeness
+)
+
 target_link_libraries(codotaku PRIVATE
     volk::volk_headers
     Vulkan::Headers
+    GPUOpen::VulkanMemoryAllocator
     PkgConfig::WAYLAND
+    PkgConfig::DRM
 )
