@@ -34,8 +34,8 @@ VkImageAspectFlags get_aspect_mask(VkFormat format) {
 
 } // namespace
 
-GBuffer::GBuffer(VulkanContext& vk, uint32_t initial_width, uint32_t initial_height) {
-    init(vk, initial_width, initial_height);
+GBuffer::GBuffer(VulkanContext& vk, uint32_t default_width, uint32_t default_height) {
+    init(vk, default_width, default_height);
 }
 
 GBuffer::~GBuffer() {
@@ -45,8 +45,8 @@ GBuffer::~GBuffer() {
 GBuffer::GBuffer(GBuffer&& other) noexcept
     : m_device(std::exchange(other.m_device, VK_NULL_HANDLE)),
       m_allocator(std::exchange(other.m_allocator, VK_NULL_HANDLE)),
-      m_current_width(std::exchange(other.m_current_width, 0)),
-      m_current_height(std::exchange(other.m_current_height, 0)),
+      m_default_width(std::exchange(other.m_default_width, 0)),
+      m_default_height(std::exchange(other.m_default_height, 0)),
       m_attachments(std::move(other.m_attachments)),
       m_free_indices(std::move(other.m_free_indices)),
       m_active_count(std::exchange(other.m_active_count, 0)) {}
@@ -56,8 +56,8 @@ GBuffer& GBuffer::operator=(GBuffer&& other) noexcept {
         cleanup();
         m_device = std::exchange(other.m_device, VK_NULL_HANDLE);
         m_allocator = std::exchange(other.m_allocator, VK_NULL_HANDLE);
-        m_current_width = std::exchange(other.m_current_width, 0);
-        m_current_height = std::exchange(other.m_current_height, 0);
+        m_default_width = std::exchange(other.m_default_width, 0);
+        m_default_height = std::exchange(other.m_default_height, 0);
         m_attachments = std::move(other.m_attachments);
         m_free_indices = std::move(other.m_free_indices);
         m_active_count = std::exchange(other.m_active_count, 0);
@@ -65,12 +65,12 @@ GBuffer& GBuffer::operator=(GBuffer&& other) noexcept {
     return *this;
 }
 
-void GBuffer::init(VulkanContext& vk, uint32_t initial_width, uint32_t initial_height) {
+void GBuffer::init(VulkanContext& vk, uint32_t default_width, uint32_t default_height) {
     cleanup();
     m_device = vk.get_device();
     m_allocator = vk.get_allocator();
-    m_current_width = initial_width;
-    m_current_height = initial_height;
+    m_default_width = default_width;
+    m_default_height = default_height;
 }
 
 void GBuffer::cleanup() {
@@ -109,6 +109,8 @@ uint32_t GBuffer::add_attachment(const AttachmentDesc& desc) {
     att.desc = desc;
     att.format = desc.format;
     att.aspect_mask = get_aspect_mask(desc.format);
+    att.width = (desc.width > 0) ? desc.width : m_default_width;
+    att.height = (desc.height > 0) ? desc.height : m_default_height;
     att.active = true;
 
     allocate_attachment_resources(att);
@@ -137,18 +139,35 @@ bool GBuffer::has_attachment(uint32_t id) const {
     return id < m_attachments.size() && m_attachments[id].active;
 }
 
+void GBuffer::resize(uint32_t id, uint32_t new_width, uint32_t new_height) {
+    if (!has_attachment(id) || new_width == 0 || new_height == 0) return;
+    auto& att = m_attachments[id];
+    if (att.width == new_width && att.height == new_height) return;
+
+    if (m_device != VK_NULL_HANDLE) {
+        vkDeviceWaitIdle(m_device);
+    }
+
+    free_attachment_resources(att);
+    att.width = new_width;
+    att.height = new_height;
+    allocate_attachment_resources(att);
+}
+
 void GBuffer::resize_all(uint32_t new_width, uint32_t new_height) {
     if (new_width == 0 || new_height == 0) return;
-    m_current_width = new_width;
-    m_current_height = new_height;
+    m_default_width = new_width;
+    m_default_height = new_height;
 
     if (m_device != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(m_device);
     }
 
     for (auto& att : m_attachments) {
-        if (att.active && att.desc.is_relative_to_window) {
+        if (att.active) {
             free_attachment_resources(att);
+            att.width = new_width;
+            att.height = new_height;
             allocate_attachment_resources(att);
         }
     }
@@ -243,14 +262,6 @@ void GBuffer::transition(
 }
 
 void GBuffer::allocate_attachment_resources(Attachment& att) {
-    if (att.desc.is_relative_to_window) {
-        att.width = std::max(1u, static_cast<uint32_t>(m_current_width * att.desc.scale));
-        att.height = std::max(1u, static_cast<uint32_t>(m_current_height * att.desc.scale));
-    } else {
-        att.width = std::max(1u, att.desc.fixed_width);
-        att.height = std::max(1u, att.desc.fixed_height);
-    }
-
     VkImageUsageFlags usage = att.desc.usage;
     if (is_depth_format(att.format)) {
         usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;

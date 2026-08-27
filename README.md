@@ -33,9 +33,9 @@ Inspired by modern Linux presentation paradigms (such as NVIDIA's `egl-wayland2`
   - **Dynamic Frame Arena**: 64 KB host-mapped ring buffer for per-frame scene/transform data.
   - Compact **8-byte push constants** (`uint64_t sceneDataAddress`).
 - **Dynamic GBuffer & RenderTarget Pool Abstraction**:
-  - Dynamically allocate $N$ images with arbitrary formats, usages, relative scales (e.g. 1.0x, 0.5x), or fixed resolutions.
-  - Recreates all resolution-dependent attachments in bulk on window resize (`gbuffer.resize_all(w, h)`).
-  - Add and delete render targets at runtime, receiving a stable index handle to retrieve `VkImageView`, `VkImage`, `VkFormat`, or `VkRenderingAttachmentInfo`.
+  - Dynamically allocate $N$ images with arbitrary formats, usages, dimensions, and sample counts.
+  - Recreates all attachments in bulk with `gbuffer.resize_all(w, h)` or individually with `gbuffer.resize(id, w, h)`.
+  - Add and delete render targets dynamically at runtime, receiving a stable index handle to retrieve `VkImageView`, `VkImage`, `VkFormat`, or `VkRenderingAttachmentInfo`.
 - **Built-in 3D Camera & Scene Abstractions**:
   - `codotaku::Camera`: Full perspective, view matrix (`lookAt`), orbit, zoom, and Vulkan NDC clip space alignment.
   - `codotaku::SceneData`: Camera matrices, lighting parameters, and hierarchical BDA addresses.

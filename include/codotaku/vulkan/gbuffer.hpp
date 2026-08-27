@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstdint>
-#include <optional>
 #include <string>
 #include <vector>
 
@@ -16,10 +15,8 @@ struct AttachmentDesc {
     std::string name{"attachment"};
     VkFormat format{VK_FORMAT_R16G16B16A16_SFLOAT};
     VkImageUsageFlags usage{VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT};
-    float scale{1.0f};                      // 1.0 = full res, 0.5 = half res
-    bool is_relative_to_window{true};      // If true, resized automatically on resize_all()
-    uint32_t fixed_width{0};                // Used if is_relative_to_window == false
-    uint32_t fixed_height{0};               // Used if is_relative_to_window == false
+    uint32_t width{0};  // 0 = use GBuffer default width
+    uint32_t height{0}; // 0 = use GBuffer default height
     VkSampleCountFlagBits samples{VK_SAMPLE_COUNT_1_BIT};
     VkClearValue clear_value{.color = {.float32 = {0.0f, 0.0f, 0.0f, 1.0f}}};
 };
@@ -42,7 +39,7 @@ struct Attachment {
 class GBuffer {
 public:
     GBuffer() = default;
-    GBuffer(VulkanContext& vk, uint32_t initial_width = 800, uint32_t initial_height = 600);
+    GBuffer(VulkanContext& vk, uint32_t default_width = 800, uint32_t default_height = 600);
     ~GBuffer();
 
     GBuffer(const GBuffer&) = delete;
@@ -51,7 +48,7 @@ public:
     GBuffer(GBuffer&& other) noexcept;
     GBuffer& operator=(GBuffer&& other) noexcept;
 
-    void init(VulkanContext& vk, uint32_t initial_width = 800, uint32_t initial_height = 600);
+    void init(VulkanContext& vk, uint32_t default_width = 800, uint32_t default_height = 600);
     void cleanup();
 
     // Dynamic attachment management (returns stable integer index ID)
@@ -59,7 +56,8 @@ public:
     void remove_attachment(uint32_t id);
     bool has_attachment(uint32_t id) const;
 
-    // Bulk resizing (recreates all window-relative images in bulk)
+    // Resizing
+    void resize(uint32_t id, uint32_t new_width, uint32_t new_height);
     void resize_all(uint32_t new_width, uint32_t new_height);
 
     // Accessors by index ID
@@ -90,8 +88,8 @@ private:
 
     VkDevice m_device{VK_NULL_HANDLE};
     VmaAllocator m_allocator{VK_NULL_HANDLE};
-    uint32_t m_current_width{800};
-    uint32_t m_current_height{600};
+    uint32_t m_default_width{800};
+    uint32_t m_default_height{600};
 
     std::vector<Attachment> m_attachments;
     std::vector<uint32_t> m_free_indices;

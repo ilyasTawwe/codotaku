@@ -142,42 +142,35 @@ int main() {
         // 4. Create 3D Camera
         codotaku::Camera camera({0.0f, 1.4f, 3.2f}, {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, 45.0f);
 
-        // 5. GBuffer Abstraction: Dynamically allocate custom offscreen render targets
+        // 5. GBuffer Abstraction: Allocate N images with particular properties
         codotaku::GBuffer gbuffer(app.get_vulkan(), 800, 600);
 
-        // Add an HDR Albedo texture attachment (relative to window resolution)
+        // Add HDR Albedo attachment
         uint32_t albedo_id = gbuffer.add_attachment({
             .name = "hdr_albedo",
             .format = VK_FORMAT_R16G16B16A16_SFLOAT,
             .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-            .scale = 1.0f,
-            .is_relative_to_window = true,
         });
 
-        // Add a Half-resolution Bloom / AO attachment
-        uint32_t half_res_id = gbuffer.add_attachment({
-            .name = "half_res_bloom",
-            .format = VK_FORMAT_R16G16B16A16_SFLOAT,
+        // Add Normal/Velocity attachment
+        uint32_t normal_id = gbuffer.add_attachment({
+            .name = "normal_buffer",
+            .format = VK_FORMAT_R16G16_SFLOAT,
             .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-            .scale = 0.5f,
-            .is_relative_to_window = true,
         });
 
-        // Add a Fixed-size 512x512 Shadow/LUT map attachment
-        uint32_t shadow_id = gbuffer.add_attachment({
-            .name = "fixed_shadow_map",
+        // Add Depth attachment
+        uint32_t depth_id = gbuffer.add_attachment({
+            .name = "depth_buffer",
             .format = VK_FORMAT_D32_SFLOAT,
             .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-            .is_relative_to_window = false,
-            .fixed_width = 512,
-            .fixed_height = 512,
         });
 
-        std::println("[Main] GBuffer initialized with {} active attachments (Albedo ID: {}, Half-Res ID: {}, Shadow ID: {})",
-            gbuffer.get_active_count(), albedo_id, half_res_id, shadow_id);
+        std::println("[Main] GBuffer initialized with {} active attachments (Albedo: {}, Normal: {}, Depth: {})",
+            gbuffer.get_active_count(), albedo_id, normal_id, depth_id);
 
         // Demonstrate deleting an attachment dynamically
-        gbuffer.remove_attachment(half_res_id);
+        gbuffer.remove_attachment(normal_id);
         std::println("[Main] After dynamic deletion, GBuffer active attachments: {}", gbuffer.get_active_count());
 
         // 6. Spawn Windows with configurable Buffer Count, VSync mode, and Format Selector
