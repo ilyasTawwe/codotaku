@@ -132,6 +132,12 @@ private:
     int m_drm_fd{-1};
     gbm_device* m_gbm_device{nullptr};
     std::string m_drm_node_path;
+
+    bool m_has_memory_budget{false};
+    bool m_has_memory_priority{false};
+    bool m_has_maintenance4{false};
+    bool m_has_maintenance5{false};
+    bool m_has_amd_coherent{false};
 };
 
 // Aliases for compatibility

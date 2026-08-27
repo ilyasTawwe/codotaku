@@ -301,6 +301,14 @@ void VulkanDevice::create_logical_device(VulkanInstance& instance) {
     enable_dev_ext(VK_KHR_UNIFIED_IMAGE_LAYOUTS_EXTENSION_NAME);
     enable_dev_ext(VK_EXT_DESCRIPTOR_HEAP_EXTENSION_NAME);
     enable_dev_ext(VK_EXT_PHYSICAL_DEVICE_DRM_EXTENSION_NAME);
+
+    // VMA exploitable extensions
+    m_has_memory_budget = enable_dev_ext(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+    m_has_memory_priority = enable_dev_ext(VK_EXT_MEMORY_PRIORITY_EXTENSION_NAME);
+    m_has_maintenance4 = enable_dev_ext(VK_KHR_MAINTENANCE_4_EXTENSION_NAME);
+    m_has_maintenance5 = enable_dev_ext(VK_KHR_MAINTENANCE_5_EXTENSION_NAME);
+    m_has_amd_coherent = enable_dev_ext(VK_AMD_DEVICE_COHERENT_MEMORY_EXTENSION_NAME);
+
     if (video_decode_family != -1) {
         enable_dev_ext(VK_KHR_VIDEO_QUEUE_EXTENSION_NAME);
         enable_dev_ext(VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME);
@@ -316,9 +324,15 @@ void VulkanDevice::create_logical_device(VulkanInstance& instance) {
         .shaderInt16 = VK_TRUE,
     };
 
+    VkPhysicalDeviceMemoryPriorityFeaturesEXT memory_priority_features{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PRIORITY_FEATURES_EXT,
+        .pNext = nullptr,
+        .memoryPriority = VK_TRUE,
+    };
+
     VkPhysicalDeviceDescriptorHeapFeaturesEXT descriptor_heap_features{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_HEAP_FEATURES_EXT,
-        .pNext = nullptr,
+        .pNext = m_has_memory_priority ? &memory_priority_features : nullptr,
         .descriptorHeap = VK_TRUE,
         .descriptorHeapCaptureReplay = VK_FALSE,
     };
@@ -447,8 +461,15 @@ void VulkanDevice::init_vma(VulkanInstance& instance) {
     vulkan_functions.vkGetDeviceBufferMemoryRequirements = m_vkd.vkGetDeviceBufferMemoryRequirements;
     vulkan_functions.vkGetDeviceImageMemoryRequirements = m_vkd.vkGetDeviceImageMemoryRequirements;
 
+    VmaAllocatorCreateFlags vma_flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
+    if (m_has_memory_budget) vma_flags |= VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
+    if (m_has_memory_priority) vma_flags |= VMA_ALLOCATOR_CREATE_EXT_MEMORY_PRIORITY_BIT;
+    if (m_has_maintenance4) vma_flags |= VMA_ALLOCATOR_CREATE_KHR_MAINTENANCE4_BIT;
+    if (m_has_maintenance5) vma_flags |= VMA_ALLOCATOR_CREATE_KHR_MAINTENANCE5_BIT;
+    if (m_has_amd_coherent) vma_flags |= VMA_ALLOCATOR_CREATE_AMD_DEVICE_COHERENT_MEMORY_BIT;
+
     VmaAllocatorCreateInfo allocator_info{
-        .flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT,
+        .flags = vma_flags,
         .physicalDevice = m_physical_device,
         .device = m_device,
         .preferredLargeHeapBlockSize = 0,
