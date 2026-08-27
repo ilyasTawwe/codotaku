@@ -607,23 +607,6 @@ std::optional<FrameContext> Window::begin_frame(VulkanContext& vk) {
 void Window::submit_and_present(VulkanContext& vk, const FrameContext& frame) {
     auto& buf = m_buffers[m_current_buffer_idx];
 
-    // Synchronization 2: Coalesced memory barrier ensuring rendering writes are flushed before Wayland scanout
-    VkMemoryBarrier2 scanout_barrier{
-        .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
-        .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-        .srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-        .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-        .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT,
-    };
-
-    VkDependencyInfo dep_to_general{
-        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-        .memoryBarrierCount = 1,
-        .pMemoryBarriers = &scanout_barrier,
-    };
-
-    vkCmdPipelineBarrier2(frame.cmd, &dep_to_general);
-
     vkEndCommandBuffer(frame.cmd);
 
     VkSubmitInfo submit_info{
