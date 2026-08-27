@@ -1,0 +1,21 @@
+# Build artifacts
+build/
+cmake-build-*/
+bin/
+out/
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+
+# CMake user settings & artifacts
+CMakeUserPresets.json
+compile_commands.json
+
+# Compiled binaries and libraries
+*.o
+*.a
+*.so
