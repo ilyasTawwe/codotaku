@@ -20,14 +20,12 @@ void signal_handler(int) {
 
 } // namespace
 
-Application::Application(std::string app_name)
+Application::Application(std::string app_name, bool enable_validation)
     : m_app_name(std::move(app_name)),
-      m_vulkan_instance(m_app_name, true),
-      m_vulkan_device(m_vulkan_instance) {
+      m_vulkan_instance(m_app_name, enable_validation) {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
     log_info("[Codotaku] Initializing Engine '{}' (C++26)...", m_app_name);
-    m_descriptor_heap.init(m_vulkan_device);
     setup_event_loop_handlers();
 }
 
@@ -37,7 +35,6 @@ Application::~Application() {
         win->cleanup();
     }
     m_windows.clear();
-    m_descriptor_heap.cleanup();
 }
 
 void Application::setup_event_loop_handlers() {
@@ -58,47 +55,11 @@ void Application::setup_event_loop_handlers() {
     });
 }
 
-Window* Application::create_window(WindowConfig config) {
-    return create_window(std::move(config), m_vulkan_device);
-}
-
 Window* Application::create_window(WindowConfig config, VulkanDevice& device) {
     auto win = std::make_unique<Window>(m_wayland, device, std::move(config));
     Window* ptr = win.get();
     m_windows.push_back(std::move(win));
     return ptr;
-}
-
-Pipeline Application::create_pipeline(
-    const char* slang_code,
-    VkFormat color_format,
-    VkFormat depth_format,
-    const std::vector<DescriptorBindingMapping>& mappings,
-    VkCullModeFlags cull_mode,
-    VkFrontFace front_face,
-    const char* debug_name) {
-    auto compiled_shaders = m_slang.compile_source(slang_code, debug_name);
-    Pipeline pipeline;
-    pipeline.init_dynamic_rendering_bda(
-        m_vulkan_device,
-        compiled_shaders,
-        color_format,
-        depth_format,
-        mappings,
-        cull_mode,
-        front_face,
-        debug_name);
-    return pipeline;
-}
-
-Pipeline Application::create_compute_pipeline(
-    const char* slang_code,
-    const std::vector<DescriptorBindingMapping>& mappings,
-    const char* debug_name) {
-    auto compiled_shaders = m_slang.compile_source(slang_code, debug_name);
-    Pipeline pipeline;
-    pipeline.init_compute(m_vulkan_device, compiled_shaders, mappings, debug_name);
-    return pipeline;
 }
 
 bool Application::poll_events() {

@@ -128,25 +128,71 @@ void FrameContext::set_viewport_and_scissor() const {
 
 Window::Window(WaylandContext& wl, VulkanDevice& vk, WindowConfig config)
     : m_wayland_ctx(&wl),
-      m_vk(vk),
       m_config(std::move(config)),
       m_width(m_config.width),
       m_height(m_config.height) {
     init_wayland_surface(wl);
-    init_drm_syncobj_timelines(wl);
-    choose_color_format(wl);
-    create_dmabuf_buffers(wl);
+    init_gpu_resources(vk);
+}
+
+Window::~Window() {
+    cleanup();
+}
+
+void Window::init_gpu_resources(VulkanDevice& vk) {
+    m_vk = &vk;
+    init_drm_syncobj_timelines();
+    choose_color_format();
+    create_dmabuf_buffers();
     init_frame_arena();
     create_command_resources();
 
-    m_gbuffer.init(m_vk, m_width, m_height);
+    m_gbuffer.init(*m_vk, m_width, m_height);
     for (const auto& att_desc : m_config.attachments) {
         m_gbuffer.add_attachment(att_desc);
     }
 }
 
-Window::~Window() {
-    cleanup();
+void Window::cleanup_gpu_resources() {
+    if (m_vk && m_vk->get_device() != VK_NULL_HANDLE) {
+        m_vk->vkd().vkDeviceWaitIdle(m_vk->get_device());
+
+        for (auto fence : m_in_flight_fences) {
+            if (fence != VK_NULL_HANDLE) m_vk->vkd().vkDestroyFence(m_vk->get_device(), fence, nullptr);
+        }
+        m_in_flight_fences.clear();
+
+        for (auto sem : m_render_complete_semaphores) {
+            if (sem != VK_NULL_HANDLE) m_vk->vkd().vkDestroySemaphore(m_vk->get_device(), sem, nullptr);
+        }
+        m_render_complete_semaphores.clear();
+
+        if (m_command_pool != VK_NULL_HANDLE) {
+            m_vk->vkd().vkDestroyCommandPool(m_vk->get_device(), m_command_pool, nullptr);
+            m_command_pool = VK_NULL_HANDLE;
+        }
+
+        m_frame_arena.cleanup(m_vk->get_allocator());
+        m_gbuffer.cleanup();
+        cleanup_dmabuf_buffers();
+
+        destroy_drm_timeline(m_vk->get_drm_fd(), m_acquire_timeline);
+        destroy_drm_timeline(m_vk->get_drm_fd(), m_release_timeline);
+    }
+
+    if (m_syncobj_surface) {
+        wp_linux_drm_syncobj_surface_v1_destroy(m_syncobj_surface);
+        m_syncobj_surface = nullptr;
+    }
+}
+
+void Window::switch_device(VulkanDevice& new_device) {
+    if (m_vk == &new_device) return;
+
+    log_info("[Window] Hot-migrating '{}' to separate GPU Device...", m_config.title);
+    cleanup_gpu_resources();
+    init_gpu_resources(new_device);
+    log_info("[Window] Successfully migrated '{}' to new GPU Device.", m_config.title);
 }
 
 void Window::init_wayland_surface(WaylandContext& wl) {
@@ -185,24 +231,44 @@ void Window::init_wayland_surface(WaylandContext& wl) {
     wl_display_roundtrip(wl.get_display());
 }
 
-void Window::init_drm_syncobj_timelines(WaylandContext& wl) {
-    if (m_vk.get_drm_fd() < 0 || !wl.get_syncobj_mgr()) {
+void Window::cleanup_wayland_surface() {
+    if (m_toplevel_decoration) {
+        zxdg_toplevel_decoration_v1_destroy(m_toplevel_decoration);
+        m_toplevel_decoration = nullptr;
+    }
+    if (m_xdg_toplevel) {
+        xdg_toplevel_destroy(m_xdg_toplevel);
+        m_xdg_toplevel = nullptr;
+    }
+    if (m_xdg_surface) {
+        xdg_surface_destroy(m_xdg_surface);
+        m_xdg_surface = nullptr;
+    }
+    if (m_surface) {
+        wl_surface_destroy(m_surface);
+        m_surface = nullptr;
+    }
+}
+
+void Window::init_drm_syncobj_timelines() {
+    if (!m_vk || m_vk->get_drm_fd() < 0 || !m_wayland_ctx || !m_wayland_ctx->get_syncobj_mgr()) {
         log_warn("[Window] DRM syncobj manager not available, continuing without explicit sync.");
         return;
     }
 
     m_syncobj_surface = wp_linux_drm_syncobj_manager_v1_get_surface(
-        wl.get_syncobj_mgr(), m_surface);
+        m_wayland_ctx->get_syncobj_mgr(), m_surface);
     if (!m_syncobj_surface) {
         throw std::runtime_error("Failed to get DRM syncobj surface");
     }
 
-    init_drm_timeline(m_vk.get_drm_fd(), wl.get_syncobj_mgr(), m_acquire_timeline);
-    init_drm_timeline(m_vk.get_drm_fd(), wl.get_syncobj_mgr(), m_release_timeline);
+    init_drm_timeline(m_vk->get_drm_fd(), m_wayland_ctx->get_syncobj_mgr(), m_acquire_timeline);
+    init_drm_timeline(m_vk->get_drm_fd(), m_wayland_ctx->get_syncobj_mgr(), m_release_timeline);
 }
 
-void Window::choose_color_format(WaylandContext& wl) {
-    const auto& supported = wl.get_available_color_formats();
+void Window::choose_color_format() {
+    if (!m_wayland_ctx) return;
+    const auto& supported = m_wayland_ctx->get_available_color_formats();
     if (supported.empty()) {
         m_chosen_format = ColorFormat{
             .vk_format = VK_FORMAT_B8G8R8A8_UNORM,
@@ -221,7 +287,8 @@ void Window::choose_color_format(WaylandContext& wl) {
     m_chosen_format = supported.front();
 }
 
-void Window::create_dmabuf_buffers(WaylandContext& wl) {
+void Window::create_dmabuf_buffers() {
+    if (!m_vk || !m_wayland_ctx) return;
     m_buffers.resize(m_config.buffer_count);
 
     std::vector<uint64_t> modifiers = m_chosen_format.available_modifiers;
@@ -263,17 +330,17 @@ void Window::create_dmabuf_buffers(WaylandContext& wl) {
             .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
         };
 
-        if (m_vk.vkd().vkCreateImage(m_vk.get_device(), &image_info, nullptr, &buf.image) != VK_SUCCESS) {
+        if (m_vk->vkd().vkCreateImage(m_vk->get_device(), &image_info, nullptr, &buf.image) != VK_SUCCESS) {
             throw std::runtime_error("Failed to create DRM format modifier image for window: " + m_config.title);
         }
 
         std::string img_name = m_config.title + "_dmabuf_image_" + std::to_string(i);
-        m_vk.set_name(buf.image, img_name.c_str());
+        m_vk->set_name(buf.image, img_name.c_str());
 
         VkMemoryRequirements mem_reqs;
-        m_vk.vkd().vkGetImageMemoryRequirements(m_vk.get_device(), buf.image, &mem_reqs);
+        m_vk->vkd().vkGetImageMemoryRequirements(m_vk->get_device(), buf.image, &mem_reqs);
 
-        uint32_t mem_type_index = m_vk.find_memory_type(
+        uint32_t mem_type_index = m_vk->find_memory_type(
             mem_reqs.memoryTypeBits,
             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
@@ -297,11 +364,11 @@ void Window::create_dmabuf_buffers(WaylandContext& wl) {
             .memoryTypeIndex = mem_type_index,
         };
 
-        if (m_vk.vkd().vkAllocateMemory(m_vk.get_device(), &alloc_info, nullptr, &buf.memory) != VK_SUCCESS) {
+        if (m_vk->vkd().vkAllocateMemory(m_vk->get_device(), &alloc_info, nullptr, &buf.memory) != VK_SUCCESS) {
             throw std::runtime_error("Failed to allocate external DMA-BUF memory");
         }
 
-        if (m_vk.vkd().vkBindImageMemory(m_vk.get_device(), buf.image, buf.memory, 0) != VK_SUCCESS) {
+        if (m_vk->vkd().vkBindImageMemory(m_vk->get_device(), buf.image, buf.memory, 0) != VK_SUCCESS) {
             throw std::runtime_error("Failed to bind image memory");
         }
 
@@ -312,7 +379,7 @@ void Window::create_dmabuf_buffers(WaylandContext& wl) {
             .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
         };
 
-        if (m_vk.vkd().vkGetMemoryFdKHR(m_vk.get_device(), &get_fd_info, &buf.dmabuf_fd) != VK_SUCCESS || buf.dmabuf_fd < 0) {
+        if (m_vk->vkd().vkGetMemoryFdKHR(m_vk->get_device(), &get_fd_info, &buf.dmabuf_fd) != VK_SUCCESS || buf.dmabuf_fd < 0) {
             throw std::runtime_error("Failed to export DMA-BUF fd from Vulkan memory");
         }
 
@@ -321,7 +388,7 @@ void Window::create_dmabuf_buffers(WaylandContext& wl) {
             .pNext = nullptr,
             .drmFormatModifier = 0,
         };
-        if (m_vk.vkd().vkGetImageDrmFormatModifierPropertiesEXT(m_vk.get_device(), buf.image, &mod_props) != VK_SUCCESS) {
+        if (m_vk->vkd().vkGetImageDrmFormatModifierPropertiesEXT(m_vk->get_device(), buf.image, &mod_props) != VK_SUCCESS) {
             throw std::runtime_error("Failed to query image DRM format modifier properties");
         }
 
@@ -331,9 +398,9 @@ void Window::create_dmabuf_buffers(WaylandContext& wl) {
             .arrayLayer = 0,
         };
         VkSubresourceLayout layout{};
-        m_vk.vkd().vkGetImageSubresourceLayout(m_vk.get_device(), buf.image, &subresource, &layout);
+        m_vk->vkd().vkGetImageSubresourceLayout(m_vk->get_device(), buf.image, &subresource, &layout);
 
-        zwp_linux_buffer_params_v1* params = zwp_linux_dmabuf_v1_create_params(wl.get_dmabuf());
+        zwp_linux_buffer_params_v1* params = zwp_linux_dmabuf_v1_create_params(m_wayland_ctx->get_dmabuf());
         zwp_linux_buffer_params_v1_add(
             params,
             buf.dmabuf_fd,
@@ -377,18 +444,18 @@ void Window::create_dmabuf_buffers(WaylandContext& wl) {
             },
         };
 
-        if (m_vk.vkd().vkCreateImageView(m_vk.get_device(), &view_info, nullptr, &buf.view) != VK_SUCCESS) {
+        if (m_vk->vkd().vkCreateImageView(m_vk->get_device(), &view_info, nullptr, &buf.view) != VK_SUCCESS) {
             throw std::runtime_error("Failed to create image view for DMA-BUF buffer");
         }
 
         std::string view_name = m_config.title + "_dmabuf_view_" + std::to_string(i);
-        m_vk.set_name(buf.view, view_name.c_str());
+        m_vk->set_name(buf.view, view_name.c_str());
 
         buf.last_release_point = 0;
     }
 
     // Initialize all DMA-BUF images to VK_IMAGE_LAYOUT_GENERAL once upon creation
-    m_vk.execute_single_time_commands([&](VkCommandBuffer cmd) {
+    m_vk->execute_single_time_commands([&](VkCommandBuffer cmd) {
         std::vector<VkImageMemoryBarrier2> init_barriers;
         for (const auto& buf : m_buffers) {
             init_barriers.push_back({
@@ -423,13 +490,14 @@ void Window::create_dmabuf_buffers(WaylandContext& wl) {
             .imageMemoryBarrierCount = static_cast<uint32_t>(init_barriers.size()),
             .pImageMemoryBarriers = init_barriers.data(),
         };
-        m_vk.vkd().vkCmdPipelineBarrier2(cmd, &dep_info);
+        m_vk->vkd().vkCmdPipelineBarrier2(cmd, &dep_info);
     });
 }
 
 void Window::init_frame_arena() {
+    if (!m_vk) return;
     m_frame_arena.init(
-        m_vk,
+        *m_vk,
         FRAME_ARENA_SIZE,
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
         VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT,
@@ -437,13 +505,14 @@ void Window::init_frame_arena() {
 }
 
 void Window::cleanup_dmabuf_buffers() {
+    if (!m_vk) return;
     for (auto& buf : m_buffers) {
         if (buf.wbuffer) {
             wl_buffer_destroy(buf.wbuffer);
             buf.wbuffer = nullptr;
         }
         if (buf.view != VK_NULL_HANDLE) {
-            m_vk.vkd().vkDestroyImageView(m_vk.get_device(), buf.view, nullptr);
+            m_vk->vkd().vkDestroyImageView(m_vk->get_device(), buf.view, nullptr);
             buf.view = VK_NULL_HANDLE;
         }
         if (buf.dmabuf_fd >= 0) {
@@ -451,11 +520,11 @@ void Window::cleanup_dmabuf_buffers() {
             buf.dmabuf_fd = -1;
         }
         if (buf.image != VK_NULL_HANDLE) {
-            m_vk.vkd().vkDestroyImage(m_vk.get_device(), buf.image, nullptr);
+            m_vk->vkd().vkDestroyImage(m_vk->get_device(), buf.image, nullptr);
             buf.image = VK_NULL_HANDLE;
         }
         if (buf.memory != VK_NULL_HANDLE) {
-            m_vk.vkd().vkFreeMemory(m_vk.get_device(), buf.memory, nullptr);
+            m_vk->vkd().vkFreeMemory(m_vk->get_device(), buf.memory, nullptr);
             buf.memory = VK_NULL_HANDLE;
         }
     }
@@ -463,17 +532,18 @@ void Window::cleanup_dmabuf_buffers() {
 }
 
 void Window::create_command_resources() {
+    if (!m_vk) return;
     VkCommandPoolCreateInfo pool_info{
         .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
         .pNext = nullptr,
         .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
-        .queueFamilyIndex = m_vk.get_graphics_queue().family_index,
+        .queueFamilyIndex = m_vk->get_graphics_queue().family_index,
     };
 
-    if (m_vk.vkd().vkCreateCommandPool(m_vk.get_device(), &pool_info, nullptr, &m_command_pool) != VK_SUCCESS) {
+    if (m_vk->vkd().vkCreateCommandPool(m_vk->get_device(), &pool_info, nullptr, &m_command_pool) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create Vulkan command pool for window: " + m_config.title);
     }
-    m_vk.set_name(m_command_pool, (m_config.title + "_command_pool").c_str());
+    m_vk->set_name(m_command_pool, (m_config.title + "_command_pool").c_str());
 
     m_command_buffers.resize(m_config.buffer_count);
     VkCommandBufferAllocateInfo alloc_info{
@@ -484,7 +554,7 @@ void Window::create_command_resources() {
         .commandBufferCount = static_cast<uint32_t>(m_config.buffer_count),
     };
 
-    if (m_vk.vkd().vkAllocateCommandBuffers(m_vk.get_device(), &alloc_info, m_command_buffers.data()) != VK_SUCCESS) {
+    if (m_vk->vkd().vkAllocateCommandBuffers(m_vk->get_device(), &alloc_info, m_command_buffers.data()) != VK_SUCCESS) {
         throw std::runtime_error("Failed to allocate command buffers for window: " + m_config.title);
     }
 
@@ -495,11 +565,11 @@ void Window::create_command_resources() {
         .flags = VK_FENCE_CREATE_SIGNALED_BIT,
     };
     for (size_t i = 0; i < m_config.buffer_count; ++i) {
-        if (m_vk.vkd().vkCreateFence(m_vk.get_device(), &fence_info, nullptr, &m_in_flight_fences[i]) != VK_SUCCESS) {
+        if (m_vk->vkd().vkCreateFence(m_vk->get_device(), &fence_info, nullptr, &m_in_flight_fences[i]) != VK_SUCCESS) {
             throw std::runtime_error("Failed to create in-flight fence");
         }
-        m_vk.set_name(m_in_flight_fences[i], (m_config.title + "_fence_" + std::to_string(i)).c_str());
-        m_vk.set_name(m_command_buffers[i], (m_config.title + "_cmd_" + std::to_string(i)).c_str());
+        m_vk->set_name(m_in_flight_fences[i], (m_config.title + "_fence_" + std::to_string(i)).c_str());
+        m_vk->set_name(m_command_buffers[i], (m_config.title + "_cmd_" + std::to_string(i)).c_str());
     }
 
     m_render_complete_semaphores.resize(m_config.buffer_count);
@@ -514,60 +584,16 @@ void Window::create_command_resources() {
         .flags = 0,
     };
     for (size_t i = 0; i < m_config.buffer_count; ++i) {
-        if (m_vk.vkd().vkCreateSemaphore(m_vk.get_device(), &sem_info, nullptr, &m_render_complete_semaphores[i]) != VK_SUCCESS) {
+        if (m_vk->vkd().vkCreateSemaphore(m_vk->get_device(), &sem_info, nullptr, &m_render_complete_semaphores[i]) != VK_SUCCESS) {
             throw std::runtime_error("Failed to create persistent exportable semaphore");
         }
-        m_vk.set_name(m_render_complete_semaphores[i], (m_config.title + "_sem_" + std::to_string(i)).c_str());
+        m_vk->set_name(m_render_complete_semaphores[i], (m_config.title + "_sem_" + std::to_string(i)).c_str());
     }
 }
 
 void Window::cleanup() {
-    if (m_vk.get_device() != VK_NULL_HANDLE) {
-        m_vk.vkd().vkDeviceWaitIdle(m_vk.get_device());
-
-        for (auto fence : m_in_flight_fences) {
-            if (fence != VK_NULL_HANDLE) m_vk.vkd().vkDestroyFence(m_vk.get_device(), fence, nullptr);
-        }
-        m_in_flight_fences.clear();
-
-        for (auto sem : m_render_complete_semaphores) {
-            if (sem != VK_NULL_HANDLE) m_vk.vkd().vkDestroySemaphore(m_vk.get_device(), sem, nullptr);
-        }
-        m_render_complete_semaphores.clear();
-
-        if (m_command_pool != VK_NULL_HANDLE) {
-            m_vk.vkd().vkDestroyCommandPool(m_vk.get_device(), m_command_pool, nullptr);
-            m_command_pool = VK_NULL_HANDLE;
-        }
-
-        m_frame_arena.cleanup(m_vk.get_allocator());
-        m_gbuffer.cleanup();
-        cleanup_dmabuf_buffers();
-
-        destroy_drm_timeline(m_vk.get_drm_fd(), m_acquire_timeline);
-        destroy_drm_timeline(m_vk.get_drm_fd(), m_release_timeline);
-    }
-
-    if (m_syncobj_surface) {
-        wp_linux_drm_syncobj_surface_v1_destroy(m_syncobj_surface);
-        m_syncobj_surface = nullptr;
-    }
-    if (m_toplevel_decoration) {
-        zxdg_toplevel_decoration_v1_destroy(m_toplevel_decoration);
-        m_toplevel_decoration = nullptr;
-    }
-    if (m_xdg_toplevel) {
-        xdg_toplevel_destroy(m_xdg_toplevel);
-        m_xdg_toplevel = nullptr;
-    }
-    if (m_xdg_surface) {
-        xdg_surface_destroy(m_xdg_surface);
-        m_xdg_surface = nullptr;
-    }
-    if (m_surface) {
-        wl_surface_destroy(m_surface);
-        m_surface = nullptr;
-    }
+    cleanup_gpu_resources();
+    cleanup_wayland_surface();
 }
 
 void Window::handle_toplevel_configure(int32_t width, int32_t height) {
@@ -605,17 +631,17 @@ void Window::close() {
 }
 
 void Window::recreate_buffers() {
-    if (!m_wayland_ctx) return;
-    m_vk.vkd().vkDeviceWaitIdle(m_vk.get_device());
+    if (!m_wayland_ctx || !m_vk) return;
+    m_vk->vkd().vkDeviceWaitIdle(m_vk->get_device());
     cleanup_dmabuf_buffers();
-    create_dmabuf_buffers(*m_wayland_ctx);
+    create_dmabuf_buffers();
 
     m_gbuffer.resize_all(m_width, m_height);
     m_current_buffer_idx = 0;
 }
 
 std::optional<FrameContext> Window::begin_frame() {
-    if (!m_open || !m_configured) return std::nullopt;
+    if (!m_open || !m_configured || !m_vk) return std::nullopt;
 
     if (m_need_resize) {
         m_need_resize = false;
@@ -630,14 +656,14 @@ std::optional<FrameContext> Window::begin_frame() {
 
     // Explicit sync: Wait for the compositor to release this specific buffer
     if (buf.last_release_point > 0) {
-        timeline_wait_point(m_vk.get_drm_fd(), m_release_timeline, buf.last_release_point);
+        timeline_wait_point(m_vk->get_drm_fd(), m_release_timeline, buf.last_release_point);
     }
 
-    m_vk.vkd().vkWaitForFences(m_vk.get_device(), 1, &m_in_flight_fences[m_current_buffer_idx], VK_TRUE, UINT64_MAX);
-    m_vk.vkd().vkResetFences(m_vk.get_device(), 1, &m_in_flight_fences[m_current_buffer_idx]);
+    m_vk->vkd().vkWaitForFences(m_vk->get_device(), 1, &m_in_flight_fences[m_current_buffer_idx], VK_TRUE, UINT64_MAX);
+    m_vk->vkd().vkResetFences(m_vk->get_device(), 1, &m_in_flight_fences[m_current_buffer_idx]);
 
     auto cmd = m_command_buffers[m_current_buffer_idx];
-    m_vk.vkd().vkResetCommandBuffer(cmd, 0);
+    m_vk->vkd().vkResetCommandBuffer(cmd, 0);
 
     VkCommandBufferBeginInfo begin_info{
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -645,7 +671,7 @@ std::optional<FrameContext> Window::begin_frame() {
         .flags = 0,
         .pInheritanceInfo = nullptr,
     };
-    m_vk.vkd().vkBeginCommandBuffer(cmd, &begin_info);
+    m_vk->vkd().vkBeginCommandBuffer(cmd, &begin_info);
 
     float aspect = (m_height > 0) ? (static_cast<float>(m_width) / static_cast<float>(m_height)) : 1.0f;
 
@@ -658,15 +684,16 @@ std::optional<FrameContext> Window::begin_frame() {
         .buffer_index = m_current_buffer_idx,
         .frame_arena = m_frame_arena,
         .gbuffer = m_gbuffer,
-        .device = m_vk,
-        .vkd = m_vk.vkd(),
+        .device = *m_vk,
+        .vkd = m_vk->vkd(),
     };
 }
 
 void Window::submit_and_present(const FrameContext& frame) {
+    if (!m_vk) return;
     auto& buf = m_buffers[m_current_buffer_idx];
 
-    m_vk.vkd().vkEndCommandBuffer(frame.cmd);
+    m_vk->vkd().vkEndCommandBuffer(frame.cmd);
 
     VkSubmitInfo submit_info{
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
@@ -680,8 +707,9 @@ void Window::submit_and_present(const FrameContext& frame) {
         .pSignalSemaphores = &m_render_complete_semaphores[m_current_buffer_idx],
     };
 
-    if (m_vk.vkd().vkQueueSubmit(m_vk.get_graphics_queue().handle, 1, &submit_info, m_in_flight_fences[m_current_buffer_idx]) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to submit draw command buffer");
+    if (m_vk->vkd().vkQueueSubmit(m_vk->get_graphics_queue().handle, 1, &submit_info, m_in_flight_fences[m_current_buffer_idx]) != VK_SUCCESS) {
+        m_vk->mark_lost();
+        throw std::runtime_error("Failed to submit draw command buffer (device lost?)");
     }
 
     // Export sync_file from Vulkan semaphore
@@ -693,12 +721,12 @@ void Window::submit_and_present(const FrameContext& frame) {
     };
 
     int sync_file_fd = -1;
-    if (m_vk.vkd().vkGetSemaphoreFdKHR(m_vk.get_device(), &get_sem_fd_info, &sync_file_fd) != VK_SUCCESS || sync_file_fd < 0) {
+    if (m_vk->vkd().vkGetSemaphoreFdKHR(m_vk->get_device(), &get_sem_fd_info, &sync_file_fd) != VK_SUCCESS || sync_file_fd < 0) {
         throw std::runtime_error("Failed to export sync file fd from semaphore");
     }
 
     // Attach sync_file to DRM acquire timeline
-    timeline_attach_sync_fd(m_vk.get_drm_fd(), m_acquire_timeline, sync_file_fd);
+    timeline_attach_sync_fd(m_vk->get_drm_fd(), m_acquire_timeline, sync_file_fd);
 
     // Advance release timeline point for this buffer
     m_release_timeline.point++;

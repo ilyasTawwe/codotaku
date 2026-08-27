@@ -11,6 +11,7 @@
 #include <gbm.h>
 
 #include <codotaku/vulkan/instance.hpp>
+#include <codotaku/vulkan/descriptor_heap.hpp>
 
 namespace codotaku {
 
@@ -72,6 +73,16 @@ public:
     const DeviceAlignmentLimits& get_alignment_limits() const { return m_alignment_limits; }
     const VkPhysicalDeviceDescriptorHeapPropertiesEXT& get_descriptor_heap_properties() const { return m_descriptor_heap_properties; }
 
+    // Device-owned Descriptor Heap
+    DescriptorHeap& descriptor_heap() { return m_descriptor_heap; }
+    const DescriptorHeap& descriptor_heap() const { return m_descriptor_heap; }
+    DescriptorHeap& get_descriptor_heap() { return m_descriptor_heap; }
+    const DescriptorHeap& get_descriptor_heap() const { return m_descriptor_heap; }
+
+    // Status
+    bool is_lost() const { return m_is_lost; }
+    void mark_lost() { m_is_lost = true; }
+
     // GPU DRM & GBM handles
     int get_drm_fd() const { return m_drm_fd; }
     gbm_device* get_gbm_device() const { return m_gbm_device; }
@@ -128,6 +139,8 @@ private:
     DeviceAlignmentLimits m_alignment_limits{};
     VkPhysicalDeviceDescriptorHeapPropertiesEXT m_descriptor_heap_properties{};
     VkPhysicalDeviceDrmPropertiesEXT m_drm_properties{};
+    DescriptorHeap m_descriptor_heap{};
+    bool m_is_lost{false};
 
     int m_drm_fd{-1};
     gbm_device* m_gbm_device{nullptr};

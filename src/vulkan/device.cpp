@@ -29,6 +29,7 @@ VulkanDevice::VulkanDevice(VulkanInstance& instance, VkPhysicalDevice preferred_
     setup_drm_and_gbm();
     create_logical_device(instance);
     init_vma(instance);
+    m_descriptor_heap.init(*this);
 }
 
 VulkanDevice::~VulkanDevice() {
@@ -53,6 +54,8 @@ VulkanDevice::VulkanDevice(VulkanDevice&& other) noexcept
       m_alignment_limits(other.m_alignment_limits),
       m_descriptor_heap_properties(other.m_descriptor_heap_properties),
       m_drm_properties(other.m_drm_properties),
+      m_descriptor_heap(std::move(other.m_descriptor_heap)),
+      m_is_lost(other.m_is_lost),
       m_drm_fd(std::exchange(other.m_drm_fd, -1)),
       m_gbm_device(std::exchange(other.m_gbm_device, nullptr)),
       m_drm_node_path(std::move(other.m_drm_node_path)) {}
@@ -77,6 +80,8 @@ VulkanDevice& VulkanDevice::operator=(VulkanDevice&& other) noexcept {
         m_alignment_limits = other.m_alignment_limits;
         m_descriptor_heap_properties = other.m_descriptor_heap_properties;
         m_drm_properties = other.m_drm_properties;
+        m_descriptor_heap = std::move(other.m_descriptor_heap);
+        m_is_lost = other.m_is_lost;
         m_drm_fd = std::exchange(other.m_drm_fd, -1);
         m_gbm_device = std::exchange(other.m_gbm_device, nullptr);
         m_drm_node_path = std::move(other.m_drm_node_path);
@@ -625,6 +630,8 @@ void VulkanDevice::insert_debug_label(VkCommandBuffer cmd, const char* label_nam
 void VulkanDevice::cleanup() {
     if (m_device != VK_NULL_HANDLE) {
         m_vkd.vkDeviceWaitIdle(m_device);
+
+        m_descriptor_heap.cleanup();
 
         if (m_allocator != VK_NULL_HANDLE) {
             vmaDestroyAllocator(m_allocator);

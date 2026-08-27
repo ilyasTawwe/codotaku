@@ -60,6 +60,9 @@ public:
 
     void cleanup();
 
+    // Hot GPU Migration / Device Switching without destroying Wayland surface
+    void switch_device(VulkanDevice& new_device);
+
     bool is_open() const { return m_open; }
     bool is_configured() const { return m_configured; }
     uint32_t get_width() const { return m_width; }
@@ -73,8 +76,8 @@ public:
     void set_primary(bool primary) { m_config.is_primary = primary; }
     void set_close_callback(WindowCloseCallback callback) { m_config.on_close = std::move(callback); }
 
-    VulkanDevice& get_device() { return m_vk; }
-    const VulkanDevice& get_device() const { return m_vk; }
+    VulkanDevice& get_device() { return *m_vk; }
+    const VulkanDevice& get_device() const { return *m_vk; }
 
     GBuffer& get_gbuffer() { return m_gbuffer; }
     const GBuffer& get_gbuffer() const { return m_gbuffer; }
@@ -89,16 +92,21 @@ public:
 
 private:
     void init_wayland_surface(WaylandContext& wl);
-    void init_drm_syncobj_timelines(WaylandContext& wl);
-    void choose_color_format(WaylandContext& wl);
-    void create_dmabuf_buffers(WaylandContext& wl);
+    void cleanup_wayland_surface();
+
+    void init_gpu_resources(VulkanDevice& vk);
+    void cleanup_gpu_resources();
+
+    void init_drm_syncobj_timelines();
+    void choose_color_format();
+    void create_dmabuf_buffers();
     void cleanup_dmabuf_buffers();
     void init_frame_arena();
     void recreate_buffers();
     void create_command_resources();
 
     WaylandContext* m_wayland_ctx{nullptr};
-    VulkanDevice& m_vk;
+    VulkanDevice* m_vk{nullptr};
     WindowConfig m_config;
     uint32_t m_width{800};
     uint32_t m_height{600};

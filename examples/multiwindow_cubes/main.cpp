@@ -204,26 +204,30 @@ float4 fsMain(VertexOutput input) : SV_Target {
 
 int main() {
     try {
-        codotaku::Application app("Codotaku Engine Demo (Compute Texture Generation on the Fly)");
-        auto& vk = app.get_vulkan();
+        codotaku::Application app("Codotaku Engine Demo (Multi-Device Multi-GPU Capable)");
 
-        // 1. Create Uploader immediately at startup
-        codotaku::Uploader uploader(vk);
+        // ---------------------------------------------------------------------
+        // 1. CREATE INDEPENDENT LOGICAL DEVICES EXPLICITLY
+        // ---------------------------------------------------------------------
+        auto dev1 = app.create_device(); // Logical Device 1 (Primary GPU)
+        auto dev2 = app.create_device(); // Logical Device 2 (Separate Logical GPU)
 
-        // 2. Allocate Static Geometry Arena (4 MB) with custom debug name
+        // ---------------------------------------------------------------------
+        // 2. INITIALIZE RESOURCES ON DEVICE 1 (DEV1)
+        // ---------------------------------------------------------------------
+        codotaku::Uploader uploader(*dev1);
+
         codotaku::GpuBufferArena geometry_arena;
         geometry_arena.init(
-            vk,
+            *dev1,
             4 * 1024 * 1024,
             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
             VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
-            "Static Geometry Arena");
+            "Dev1 Static Geometry Arena");
 
-        // 3. Enqueue geometry uploads into Geometry Arena (returns BDA suballocation immediately)
         auto vb_sub = uploader.upload_to_arena(geometry_arena, std::span(CUBE_VERTICES));
         auto ib_sub = uploader.upload_to_arena(geometry_arena, std::span(CUBE_INDICES));
 
-        // 4. Enqueue indirect draw command upload into Geometry Arena
         VkDrawIndirectCommand indirect_cmd{
             .vertexCount = static_cast<uint32_t>(CUBE_INDICES.size()),
             .instanceCount = 1,
@@ -231,8 +235,6 @@ int main() {
             .firstInstance = 0,
         };
         auto cmd_sub = uploader.upload_to_arena(geometry_arena, indirect_cmd);
-
-        // 5. Submit geometry DMA copies to GPU in background
         uploader.upload();
 
         codotaku::TextureDesc tex_desc = {
@@ -241,26 +243,29 @@ int main() {
             .min_filter = VK_FILTER_LINEAR,
             .mag_filter = VK_FILTER_LINEAR,
         };
-        auto checkerboard_tex = codotaku::Texture::create_uninitialized(vk, 256, 256, tex_desc);
-        auto grid_tex = codotaku::Texture::create_uninitialized(vk, 256, 256, tex_desc);
+        auto checkerboard_tex = codotaku::Texture::create_uninitialized(*dev1, 256, 256, tex_desc);
+        auto grid_tex = codotaku::Texture::create_uninitialized(*dev1, 256, 256, tex_desc);
 
-        // Write image and sampler descriptors to VK_EXT_descriptor_heap
-        checkerboard_tex.write_to_descriptor_heap(app.get_descriptor_heap());
-        grid_tex.write_to_descriptor_heap(app.get_descriptor_heap());
+        // Write image and sampler descriptors to DEV1 descriptor heap
+        checkerboard_tex.write_to_descriptor_heap(dev1->descriptor_heap());
+        grid_tex.write_to_descriptor_heap(dev1->descriptor_heap());
 
-        // ---------------------------------------------------------------------
-        // COMPUTE SHADER TEXTURE GENERATION ON GPU VIA VK_EXT_descriptor_heap
-        // ---------------------------------------------------------------------
-        auto compute_pipeline_checker = app.create_compute_pipeline(
-            COMPUTE_TEXTURE_GEN_SLANG,
-            { codotaku::Pipeline::map_storage_image(0, 0, checkerboard_tex.get_storage_heap_offset()) });
+        // Compute Shader Texture Generation on DEV1
+        auto compute_pipeline_checker = codotaku::Pipeline{};
+        compute_pipeline_checker.init_compute(
+            *dev1,
+            app.get_slang().compile_source(COMPUTE_TEXTURE_GEN_SLANG, "Dev1 Checker Compute"),
+            { codotaku::Pipeline::map_storage_image(0, 0, checkerboard_tex.get_storage_heap_offset()) },
+            "Dev1 Checker Compute");
 
-        auto compute_pipeline_grid = app.create_compute_pipeline(
-            COMPUTE_TEXTURE_GEN_SLANG,
-            { codotaku::Pipeline::map_storage_image(0, 0, grid_tex.get_storage_heap_offset()) });
+        auto compute_pipeline_grid = codotaku::Pipeline{};
+        compute_pipeline_grid.init_compute(
+            *dev1,
+            app.get_slang().compile_source(COMPUTE_TEXTURE_GEN_SLANG, "Dev1 Grid Compute"),
+            { codotaku::Pipeline::map_storage_image(0, 0, grid_tex.get_storage_heap_offset()) },
+            "Dev1 Grid Compute");
 
-        // Execute compute dispatches on the GPU to generate both textures directly into VRAM
-        vk.execute_single_time_commands([&](VkCommandBuffer cmd) {
+        dev1->execute_single_time_commands([&](VkCommandBuffer cmd) {
             VkImageSubresourceRange range{
                 .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
                 .baseMipLevel = 0,
@@ -304,22 +309,21 @@ int main() {
                 .imageMemoryBarrierCount = 2,
                 .pImageMemoryBarriers = pre_barriers,
             };
-            vk.vkd().vkCmdPipelineBarrier2(cmd, &pre_dep);
+            dev1->vkd().vkCmdPipelineBarrier2(cmd, &pre_dep);
 
-            // Bind Global Descriptor Heaps
-            app.get_descriptor_heap().bind(cmd);
+            dev1->descriptor_heap().bind(cmd);
 
             // Dispatch 1: Generate Checkerboard (pattern_type = 0)
-            vk.vkd().vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compute_pipeline_checker.get_pipeline());
+            dev1->vkd().vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compute_pipeline_checker.get_pipeline());
             struct { uint32_t width, height, pattern_type; float time; } pc0 = { 256, 256, 0, 0.0f };
-            app.get_descriptor_heap().push_data(cmd, pc0);
-            vk.vkd().vkCmdDispatch(cmd, 256 / 16, 256 / 16, 1);
+            dev1->descriptor_heap().push_data(cmd, pc0);
+            dev1->vkd().vkCmdDispatch(cmd, 256 / 16, 256 / 16, 1);
 
             // Dispatch 2: Generate Grid Pattern (pattern_type = 1)
-            vk.vkd().vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compute_pipeline_grid.get_pipeline());
+            dev1->vkd().vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compute_pipeline_grid.get_pipeline());
             struct { uint32_t width, height, pattern_type; float time; } pc1 = { 256, 256, 1, 0.0f };
-            app.get_descriptor_heap().push_data(cmd, pc1);
-            vk.vkd().vkCmdDispatch(cmd, 256 / 16, 256 / 16, 1);
+            dev1->descriptor_heap().push_data(cmd, pc1);
+            dev1->vkd().vkCmdDispatch(cmd, 256 / 16, 256 / 16, 1);
 
             // Coalesced memory barrier: Ensures compute storage image writes are visible to fragment shader sampling
             VkMemoryBarrier2 compute_to_graphics_barrier{
@@ -335,22 +339,16 @@ int main() {
                 .memoryBarrierCount = 1,
                 .pMemoryBarriers = &compute_to_graphics_barrier,
             };
-            vk.vkd().vkCmdPipelineBarrier2(cmd, &post_dep);
+            dev1->vkd().vkCmdPipelineBarrier2(cmd, &post_dep);
         });
 
         compute_pipeline_checker.cleanup();
         compute_pipeline_grid.cleanup();
-        std::println("[Main] Successfully generated textures on the fly using VK_EXT_descriptor_heap compute pipeline!");
+        std::println("[Main] Successfully generated textures on DEV1 using descriptor heap compute pipeline!");
 
         // ---------------------------------------------------------------------
-        // CREATE SEPARATE LOGICAL DEVICE (DEV2) FOR WINDOW 2
+        // 3. INITIALIZE RESOURCES ON SEPARATE LOGICAL DEVICE 2 (DEV2)
         // ---------------------------------------------------------------------
-        auto dev2 = app.create_device();
-
-        // DEV2 Descriptor Heap & Geometry Staging Uploader
-        codotaku::DescriptorHeap dev2_heap;
-        dev2_heap.init(*dev2);
-
         codotaku::Uploader dev2_uploader(*dev2);
 
         codotaku::GpuBufferArena dev2_geometry_arena;
@@ -367,7 +365,7 @@ int main() {
         dev2_uploader.upload();
 
         auto dev2_grid_tex = codotaku::Texture::create_uninitialized(*dev2, 256, 256, tex_desc);
-        dev2_grid_tex.write_to_descriptor_heap(dev2_heap);
+        dev2_grid_tex.write_to_descriptor_heap(dev2->descriptor_heap());
 
         // DEV2 Compute Texture Generation Pipeline
         auto dev2_compute_pipeline = codotaku::Pipeline{};
@@ -408,11 +406,11 @@ int main() {
             };
             dev2->vkd().vkCmdPipelineBarrier2(cmd, &pre_dep);
 
-            dev2_heap.bind(cmd);
+            dev2->descriptor_heap().bind(cmd);
 
             dev2->vkd().vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, dev2_compute_pipeline.get_pipeline());
             struct { uint32_t width, height, pattern_type; float time; } pc = { 256, 256, 1, 0.0f };
-            dev2_heap.push_data(cmd, pc);
+            dev2->descriptor_heap().push_data(cmd, pc);
             dev2->vkd().vkCmdDispatch(cmd, 256 / 16, 256 / 16, 1);
 
             VkMemoryBarrier2 post_barrier{
@@ -432,7 +430,20 @@ int main() {
 
         dev2_compute_pipeline.cleanup();
 
-        // DEV2 Graphics Pipeline
+        // ---------------------------------------------------------------------
+        // 4. GRAPHICS PIPELINES FOR DEVICE 1 (DEV1) AND DEVICE 2 (DEV2)
+        // ---------------------------------------------------------------------
+        auto graphics_pipeline_checker = codotaku::Pipeline{};
+        graphics_pipeline_checker.init_dynamic_rendering_bda(
+            *dev1,
+            app.get_slang().compile_source(GRAPHICS_SHADER_SLANG, "Dev1 Checker Graphics Pipeline"),
+            VK_FORMAT_B8G8R8A8_UNORM,
+            VK_FORMAT_D32_SFLOAT,
+            { codotaku::Pipeline::map_sampled_texture(0, 0, checkerboard_tex.get_sampled_heap_offset(), checkerboard_tex.get_sampler_heap_offset()) },
+            VK_CULL_MODE_BACK_BIT,
+            VK_FRONT_FACE_COUNTER_CLOCKWISE,
+            "Dev1 Checker Graphics Pipeline");
+
         auto dev2_graphics_pipeline = codotaku::Pipeline{};
         dev2_graphics_pipeline.init_dynamic_rendering_bda(
             *dev2,
@@ -444,18 +455,6 @@ int main() {
             VK_FRONT_FACE_COUNTER_CLOCKWISE,
             "Dev2 Graphics Pipeline");
 
-        // ---------------------------------------------------------------------
-        // GRAPHICS PIPELINES FOR PRIMARY DEVICE (DEV1)
-        // ---------------------------------------------------------------------
-        auto graphics_pipeline_checker = app.create_pipeline(
-            GRAPHICS_SHADER_SLANG,
-            VK_FORMAT_B8G8R8A8_UNORM,
-            VK_FORMAT_D32_SFLOAT,
-            { codotaku::Pipeline::map_sampled_texture(0, 0, checkerboard_tex.get_sampled_heap_offset(), checkerboard_tex.get_sampler_heap_offset()) },
-            VK_CULL_MODE_BACK_BIT,
-            VK_FRONT_FACE_COUNTER_CLOCKWISE,
-            "Dev1 Checker Graphics Pipeline");
-
         codotaku::Camera camera({0.0f, 1.4f, 3.2f}, {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, 45.0f);
 
         codotaku::AttachmentDesc depth_desc = {
@@ -466,7 +465,7 @@ int main() {
 
         app.set_close_policy(codotaku::WindowClosePolicy::QuitOnLastWindowClose);
 
-        // Window 1 -> Bound to Primary Device (dev1)
+        // Window 1 -> Bound to Logical Device 1 (dev1)
         app.create_window({
             .title = "Window 1 (Primary Dev1, Checkerboard)",
             .width = 800,
@@ -475,10 +474,10 @@ int main() {
             .present_mode = codotaku::PresentMode::Fifo,
             .attachments = { depth_desc },
             .is_primary = true,
-        });
+        }, *dev1);
 
         // Window 2 -> Bound to SEPARATE Logical Device (dev2)!
-        app.create_window({
+        auto* win2 = app.create_window({
             .title = "Window 2 (Separate Logical Device Dev2, Grid Pattern)",
             .width = 600,
             .height = 600,
@@ -494,7 +493,7 @@ int main() {
             }
         }, *dev2);
 
-        // Window 3 -> Bound to Primary Device (dev1)
+        // Window 3 -> Bound to Logical Device 1 (dev1) with custom close hook demonstrating live switch_device!
         app.create_window({
             .title = "Window 3 (Primary Dev1, Custom Close Hook)",
             .width = 500,
@@ -502,11 +501,12 @@ int main() {
             .buffer_count = 3,
             .present_mode = codotaku::PresentMode::Fifo,
             .attachments = { depth_desc },
-            .on_close = [](codotaku::Window& win) {
-                std::println("[Custom Hook] Window '{}' intercepting close event.", win.get_title());
+            .on_close = [&](codotaku::Window& win) {
+                std::println("[Custom Hook] Window '{}' switching to DEV2 live before closing...", win.get_title());
+                win.switch_device(*dev2);
                 return true;
             },
-        });
+        }, *dev1);
 
         // Wait on geometry upload fences right before starting render loop
         uploader.wait();
@@ -559,15 +559,15 @@ int main() {
 
             if (is_dev2) {
                 // Window 2 -> Renders with separate logical device DEV2!
-                dev2_heap.bind(frame.cmd);
+                dev2->descriptor_heap().bind(frame.cmd);
                 frame.vkd.vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, dev2_graphics_pipeline.get_pipeline());
-                dev2_heap.push_data(frame.cmd, scene_addr);
+                dev2->descriptor_heap().push_data(frame.cmd, scene_addr);
                 frame.vkd.vkCmdDrawIndirect(frame.cmd, dev2_geometry_arena.get_buffer(), dev2_cmd_sub.offset, 1, sizeof(VkDrawIndirectCommand));
             } else {
-                // Windows 1 & 3 -> Render with primary logical device DEV1!
-                app.get_descriptor_heap().bind(frame.cmd);
+                // Windows 1 & 3 -> Render with logical device DEV1!
+                dev1->descriptor_heap().bind(frame.cmd);
                 frame.vkd.vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, graphics_pipeline_checker.get_pipeline());
-                app.get_descriptor_heap().push_data(frame.cmd, scene_addr);
+                dev1->descriptor_heap().push_data(frame.cmd, scene_addr);
                 frame.vkd.vkCmdDrawIndirect(frame.cmd, geometry_arena.get_buffer(), cmd_sub.offset, 1, sizeof(VkDrawIndirectCommand));
             }
 
@@ -577,8 +577,7 @@ int main() {
         checkerboard_tex.cleanup();
         grid_tex.cleanup();
         dev2_grid_tex.cleanup();
-        dev2_heap.cleanup();
-        geometry_arena.cleanup(vk.get_allocator());
+        geometry_arena.cleanup(dev1->get_allocator());
         dev2_geometry_arena.cleanup(dev2->get_allocator());
         graphics_pipeline_checker.cleanup();
         dev2_graphics_pipeline.cleanup();
