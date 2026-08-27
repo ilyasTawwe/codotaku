@@ -123,7 +123,7 @@ float4 fsMain(VertexOutput input) : SV_Target {
 
 int main() {
     try {
-        codotaku::Application app("Codotaku Engine Demo (GPU-Driven Indirect BDA)");
+        codotaku::Application app("Codotaku Engine Demo (GBuffer + GPU-Driven Indirect BDA)");
 
         // 1. Upload Mesh to Static Geometry Arena
         auto mesh = app.upload_mesh(CUBE_VERTICES, CUBE_INDICES);
@@ -142,7 +142,45 @@ int main() {
         // 4. Create 3D Camera
         codotaku::Camera camera({0.0f, 1.4f, 3.2f}, {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, 45.0f);
 
-        // 5. Spawn Windows with configurable Buffer Count, VSync mode, and Format Selector
+        // 5. GBuffer Abstraction: Dynamically allocate custom offscreen render targets
+        codotaku::GBuffer gbuffer(app.get_vulkan(), 800, 600);
+
+        // Add an HDR Albedo texture attachment (relative to window resolution)
+        uint32_t albedo_id = gbuffer.add_attachment({
+            .name = "hdr_albedo",
+            .format = VK_FORMAT_R16G16B16A16_SFLOAT,
+            .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            .scale = 1.0f,
+            .is_relative_to_window = true,
+        });
+
+        // Add a Half-resolution Bloom / AO attachment
+        uint32_t half_res_id = gbuffer.add_attachment({
+            .name = "half_res_bloom",
+            .format = VK_FORMAT_R16G16B16A16_SFLOAT,
+            .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            .scale = 0.5f,
+            .is_relative_to_window = true,
+        });
+
+        // Add a Fixed-size 512x512 Shadow/LUT map attachment
+        uint32_t shadow_id = gbuffer.add_attachment({
+            .name = "fixed_shadow_map",
+            .format = VK_FORMAT_D32_SFLOAT,
+            .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            .is_relative_to_window = false,
+            .fixed_width = 512,
+            .fixed_height = 512,
+        });
+
+        std::println("[Main] GBuffer initialized with {} active attachments (Albedo ID: {}, Half-Res ID: {}, Shadow ID: {})",
+            gbuffer.get_active_count(), albedo_id, half_res_id, shadow_id);
+
+        // Demonstrate deleting an attachment dynamically
+        gbuffer.remove_attachment(half_res_id);
+        std::println("[Main] After dynamic deletion, GBuffer active attachments: {}", gbuffer.get_active_count());
+
+        // 6. Spawn Windows with configurable Buffer Count, VSync mode, and Format Selector
         app.create_window({
             .title = "Window 1 (Triple Buffer, VSync ON, Cyan)",
             .width = 800,
@@ -150,7 +188,6 @@ int main() {
             .buffer_count = 3,
             .present_mode = codotaku::PresentMode::Fifo,
             .format_selector = [](std::span<const codotaku::ColorFormat> available) {
-                // User lambda: pick standard B8G8R8A8_UNORM format
                 for (const auto& fmt : available) {
                     if (fmt.vk_format == VK_FORMAT_B8G8R8A8_UNORM) return fmt;
                 }
@@ -176,10 +213,15 @@ int main() {
 
         auto start_time = std::chrono::steady_clock::now();
 
-        // 6. Transparent, Non-intrusive Render Loop (User controls command recording & submission!)
+        // 7. Transparent, Non-intrusive Render Loop (User controls command recording & submission!)
         int ret = app.run([&](codotaku::Window& window, codotaku::FrameContext& frame) {
             auto now = std::chrono::steady_clock::now();
             float time_sec = std::chrono::duration<float>(now - start_time).count();
+
+            // Bulk resize GBuffer when window dimensions change
+            if (gbuffer.get_width(albedo_id) != frame.width || gbuffer.get_height(albedo_id) != frame.height) {
+                gbuffer.resize_all(frame.width, frame.height);
+            }
 
             // Set camera aspect ratio matching the active window
             camera.set_aspect_ratio(frame.aspect_ratio);
@@ -240,6 +282,7 @@ int main() {
             frame.end_rendering();
         });
 
+        gbuffer.cleanup();
         pipeline.cleanup();
         return ret;
 

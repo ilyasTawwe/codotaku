@@ -32,6 +32,10 @@ Inspired by modern Linux presentation paradigms (such as NVIDIA's `egl-wayland2`
   - **Static Geometry Arena**: 4 MB contiguous VRAM buffer managing suballocations for vertex/index geometry and indirect draw commands.
   - **Dynamic Frame Arena**: 64 KB host-mapped ring buffer for per-frame scene/transform data.
   - Compact **8-byte push constants** (`uint64_t sceneDataAddress`).
+- **Dynamic GBuffer & RenderTarget Pool Abstraction**:
+  - Dynamically allocate $N$ images with arbitrary formats, usages, relative scales (e.g. 1.0x, 0.5x), or fixed resolutions.
+  - Recreates all resolution-dependent attachments in bulk on window resize (`gbuffer.resize_all(w, h)`).
+  - Add and delete render targets at runtime, receiving a stable index handle to retrieve `VkImageView`, `VkImage`, `VkFormat`, or `VkRenderingAttachmentInfo`.
 - **Built-in 3D Camera & Scene Abstractions**:
   - `codotaku::Camera`: Full perspective, view matrix (`lookAt`), orbit, zoom, and Vulkan NDC clip space alignment.
   - `codotaku::SceneData`: Camera matrices, lighting parameters, and hierarchical BDA addresses.
@@ -68,6 +72,7 @@ codotaku/
 │       │   ├── context.hpp                # Vulkan 1.4 context, Volk, VMA, DRM node
 │       │   ├── arena.hpp                  # GpuBufferArena (VmaVirtualBlock suballocations)
 │       │   ├── sync.hpp                   # DRM syncobj timeline explicit synchronization
+│       │   ├── gbuffer.hpp                # GBuffer & dynamic render target pool
 │       │   ├── indirect.hpp               # Indirect draw command batch helper
 │       │   └── pipeline.hpp               # Dynamic rendering BDA graphics pipeline
 │       ├── shader/
