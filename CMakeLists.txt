@@ -96,6 +96,27 @@ add_custom_command(
     VERBATIM
 )
 
+# 4. xdg-decoration-unstable-v1 protocol
+set(XDG_DECORATION_XML "${WAYLAND_PROTOCOLS_DIR}/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml")
+set(XDG_DECORATION_HEADER "${CMAKE_CURRENT_BINARY_DIR}/xdg-decoration-unstable-v1-client-protocol.h")
+set(XDG_DECORATION_CODE "${CMAKE_CURRENT_BINARY_DIR}/xdg-decoration-unstable-v1-protocol.c")
+
+add_custom_command(
+    OUTPUT "${XDG_DECORATION_HEADER}"
+    COMMAND ${WAYLAND_SCANNER} client-header "${XDG_DECORATION_XML}" "${XDG_DECORATION_HEADER}"
+    DEPENDS "${XDG_DECORATION_XML}"
+    COMMENT "Generating xdg-decoration-unstable-v1-client-protocol.h"
+    VERBATIM
+)
+
+add_custom_command(
+    OUTPUT "${XDG_DECORATION_CODE}"
+    COMMAND ${WAYLAND_SCANNER} private-code "${XDG_DECORATION_XML}" "${XDG_DECORATION_CODE}"
+    DEPENDS "${XDG_DECORATION_XML}"
+    COMMENT "Generating xdg-decoration-unstable-v1-protocol.c"
+    VERBATIM
+)
+
 add_executable(codotaku
     main.cpp
     "${VOLK_C}"
@@ -105,6 +126,8 @@ add_executable(codotaku
     "${DMABUF_CODE}"
     "${SYNCOBJ_HEADER}"
     "${SYNCOBJ_CODE}"
+    "${XDG_DECORATION_HEADER}"
+    "${XDG_DECORATION_CODE}"
 )
 
 target_include_directories(codotaku PRIVATE

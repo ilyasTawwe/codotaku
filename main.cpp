@@ -30,6 +30,7 @@
 
 #include "linux-dmabuf-v1-client-protocol.h"
 #include "linux-drm-syncobj-v1-client-protocol.h"
+#include "xdg-decoration-unstable-v1-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
 
 namespace {
@@ -100,10 +101,12 @@ struct WaylandState {
     xdg_wm_base* wm_base{nullptr};
     zwp_linux_dmabuf_v1* dmabuf{nullptr};
     wp_linux_drm_syncobj_manager_v1* syncobj_mgr{nullptr};
+    zxdg_decoration_manager_v1* decoration_mgr{nullptr};
 
     wl_surface* surface{nullptr};
     xdg_surface* xdg_surface{nullptr};
     xdg_toplevel* xdg_toplevel{nullptr};
+    zxdg_toplevel_decoration_v1* toplevel_decoration{nullptr};
     wp_linux_drm_syncobj_surface_v1* syncobj_surface{nullptr};
 
     std::vector<uint64_t> supported_modifiers;
@@ -223,6 +226,19 @@ const zwp_linux_dmabuf_v1_listener dmabuf_listener = {
     .modifier = dmabuf_modifier_handler,
 };
 
+// XDG Toplevel Decoration listener
+void toplevel_decoration_configure_handler(void*, zxdg_toplevel_decoration_v1*, uint32_t mode) {
+    if (mode == ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE) {
+        std::println("Wayland: Server-side decoration (SSD) configured.");
+    } else if (mode == ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE) {
+        std::println("Wayland: Client-side decoration (CSD) requested by compositor.");
+    }
+}
+
+const zxdg_toplevel_decoration_v1_listener decoration_listener = {
+    .configure = toplevel_decoration_configure_handler,
+};
+
 // Wayland Registry listener
 void registry_global_handler(void* data, wl_registry* registry, uint32_t name, const char* interface, uint32_t version) {
     auto* app = static_cast<WaylandState*>(data);
@@ -240,6 +256,9 @@ void registry_global_handler(void* data, wl_registry* registry, uint32_t name, c
     } else if (std::strcmp(interface, wp_linux_drm_syncobj_manager_v1_interface.name) == 0) {
         app->syncobj_mgr = static_cast<wp_linux_drm_syncobj_manager_v1*>(
             wl_registry_bind(registry, name, &wp_linux_drm_syncobj_manager_v1_interface, 1));
+    } else if (std::strcmp(interface, zxdg_decoration_manager_v1_interface.name) == 0) {
+        app->decoration_mgr = static_cast<zxdg_decoration_manager_v1*>(
+            wl_registry_bind(registry, name, &zxdg_decoration_manager_v1_interface, 1));
     }
 }
 
@@ -280,6 +299,16 @@ void init_wayland(WaylandState& wl) {
     xdg_toplevel_set_title(wl.xdg_toplevel, "Vulkan Dynamic Rendering Slang Triangle (C++26)");
     xdg_toplevel_set_app_id(wl.xdg_toplevel, "codotaku.vulkan.triangle");
 
+    // Request Server-Side Decoration if available
+    if (wl.decoration_mgr && wl.xdg_toplevel) {
+        wl.toplevel_decoration = zxdg_decoration_manager_v1_get_toplevel_decoration(
+            wl.decoration_mgr, wl.xdg_toplevel);
+        zxdg_toplevel_decoration_v1_add_listener(wl.toplevel_decoration, &decoration_listener, &wl);
+        zxdg_toplevel_decoration_v1_set_mode(
+            wl.toplevel_decoration, ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+        std::println("Wayland: Requested Server-Side Decorations (zxdg_decoration_manager_v1).");
+    }
+
     wl.syncobj_surface = wp_linux_drm_syncobj_manager_v1_get_surface(wl.syncobj_mgr, wl.surface);
     if (!wl.syncobj_surface) {
         throw std::runtime_error("Failed to create wp_linux_drm_syncobj_surface_v1");
@@ -291,6 +320,8 @@ void init_wayland(WaylandState& wl) {
 
 void cleanup_wayland(WaylandState& wl) {
     if (wl.syncobj_surface) wp_linux_drm_syncobj_surface_v1_destroy(wl.syncobj_surface);
+    if (wl.toplevel_decoration) zxdg_toplevel_decoration_v1_destroy(wl.toplevel_decoration);
+    if (wl.decoration_mgr) zxdg_decoration_manager_v1_destroy(wl.decoration_mgr);
     if (wl.xdg_toplevel) xdg_toplevel_destroy(wl.xdg_toplevel);
     if (wl.xdg_surface) xdg_surface_destroy(wl.xdg_surface);
     if (wl.surface) wl_surface_destroy(wl.surface);
