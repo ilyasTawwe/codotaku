@@ -4,7 +4,7 @@
 
 #include <codotaku/codotaku.hpp>
 
-// User/Application-defined Vertex format matching shader layout
+// User-defined Vertex format matching shader layout
 struct CustomVertex {
     glm::vec3 pos;
     glm::vec3 color;
@@ -83,7 +83,48 @@ struct CustomSceneData {
     uint64_t customDataAddress{0};
 };
 
-const char* SHADER_SLANG_CODE = R"(
+// Compute Shader: Generates textures directly on the GPU on the fly
+const char* COMPUTE_TEXTURE_GEN_SLANG = R"(
+[format("rgba8")]
+[[vk::binding(0, 0)]] RWTexture2D<float4> u_outputImage;
+
+struct ComputePushConstants {
+    uint2 resolution;
+    uint pattern_type; // 0 = checkerboard, 1 = glowing grid
+    float time;
+};
+[[vk::push_constant]] ComputePushConstants pc;
+
+[shader("compute")]
+[numthreads(16, 16, 1)]
+void csMain(uint3 dispatchThreadID : SV_DispatchThreadID) {
+    if (dispatchThreadID.x >= pc.resolution.x || dispatchThreadID.y >= pc.resolution.y) return;
+
+    float2 uv = float2(dispatchThreadID.xy) / float2(pc.resolution);
+    float4 color = float4(1, 1, 1, 1);
+
+    if (pc.pattern_type == 0) {
+        // High-contrast vibrant checkerboard with subtle lighting vignette
+        uint2 tile = dispatchThreadID.xy / 32;
+        bool check = ((tile.x + tile.y) % 2) == 0;
+        float dist = length(uv - 0.5);
+        float vignette = 1.0 - 0.25 * dist;
+        color = check ? float4(0.95 * vignette, 0.95 * vignette, 0.95 * vignette, 1.0)
+                      : float4(0.20 * vignette, 0.55 * vignette, 0.90 * vignette, 1.0);
+    } else if (pc.pattern_type == 1) {
+        // High-contrast glowing grid pattern
+        bool edge = (dispatchThreadID.x % 32 == 0) || (dispatchThreadID.y % 32 == 0);
+        float pulse = 0.85 + 0.15 * sin(uv.x * 6.28 + uv.y * 6.28);
+        color = edge ? float4(1.0, 1.0, 1.0, 1.0)
+                     : float4(uv.x * pulse, uv.y * pulse, 0.75, 1.0);
+    }
+
+    u_outputImage[dispatchThreadID.xy] = color;
+}
+)";
+
+// Graphics Shader: 3D Cube rendering with BDA and Slang texture sampling
+const char* GRAPHICS_SHADER_SLANG = R"(
 struct Vertex {
     float3 position;
     float3 color;
@@ -154,53 +195,16 @@ float4 fsMain(VertexOutput input) : SV_Target {
     float4 texColor = u_texture.Sample(input.uv);
     float3 lightDir = normalize(scene->light_dir);
     float diff = max(dot(input.normal, lightDir), 0.0);
-    float3 ambient = scene->ambient_intensity * texColor.rgb * input.color;
-    float3 diffuse = diff * texColor.rgb * input.color * scene->light_color;
+    float3 baseColor = texColor.rgb * input.color;
+    float3 ambient = scene->ambient_intensity * baseColor;
+    float3 diffuse = diff * baseColor * scene->light_color;
     return float4(ambient + diffuse, 1.0);
 }
 )";
 
-std::vector<uint8_t> generate_checkerboard_pixels(uint32_t width = 256, uint32_t height = 256, uint32_t tile_size = 32) {
-    std::vector<uint8_t> pixels(width * height * 4);
-    for (uint32_t y = 0; y < height; ++y) {
-        for (uint32_t x = 0; x < width; ++x) {
-            bool check = ((x / tile_size) + (y / tile_size)) % 2 == 0;
-            size_t idx = (y * width + x) * 4;
-            uint8_t val = check ? 245 : 45;
-            pixels[idx + 0] = val;
-            pixels[idx + 1] = check ? val : 130;
-            pixels[idx + 2] = check ? val : 210;
-            pixels[idx + 3] = 255;
-        }
-    }
-    return pixels;
-}
-
-std::vector<uint8_t> generate_grid_pixels(uint32_t width = 256, uint32_t height = 256) {
-    std::vector<uint8_t> pixels(width * height * 4);
-    for (uint32_t y = 0; y < height; ++y) {
-        for (uint32_t x = 0; x < width; ++x) {
-            bool edge = (x % 32 == 0) || (y % 32 == 0) || (x == width - 1) || (y == height - 1);
-            size_t idx = (y * width + x) * 4;
-            if (edge) {
-                pixels[idx + 0] = 255;
-                pixels[idx + 1] = 255;
-                pixels[idx + 2] = 255;
-                pixels[idx + 3] = 255;
-            } else {
-                pixels[idx + 0] = static_cast<uint8_t>((x * 255) / width);
-                pixels[idx + 1] = static_cast<uint8_t>((y * 255) / height);
-                pixels[idx + 2] = 160;
-                pixels[idx + 3] = 255;
-            }
-        }
-    }
-    return pixels;
-}
-
 int main() {
     try {
-        codotaku::Application app("Codotaku Engine Demo (Asynchronous Batch Uploader)");
+        codotaku::Application app("Codotaku Engine Demo (Compute Texture Generation on the Fly)");
         auto& vk = app.get_vulkan();
 
         // 1. Create Uploader immediately at startup
@@ -228,27 +232,135 @@ int main() {
         };
         auto cmd_sub = uploader.upload_to_arena(geometry_arena, indirect_cmd);
 
-        // 5. Enqueue texture uploads (allocates GPU textures and returns handles immediately)
-        auto checkerboard_pixels = generate_checkerboard_pixels();
-        auto grid_pixels = generate_grid_pixels();
-
-        auto checkerboard_tex = uploader.upload_texture(
-            256, 256, VK_FORMAT_R8G8B8A8_UNORM, checkerboard_pixels, { .name = "checkerboard" });
-
-        auto grid_tex = uploader.upload_texture(
-            256, 256, VK_FORMAT_R8G8B8A8_UNORM, grid_pixels, { .name = "grid_pattern" });
-
-        // 6. Submit all DMA staging copies to GPU in background!
+        // 5. Submit geometry DMA copies to GPU in background
         uploader.upload();
 
         // ---------------------------------------------------------------------
-        // PARALLEL CPU WORK (Overlapping while GPU DMA transfer executes):
-        // Compile Slang shaders, create pipeline, descriptor sets, and windows
+        // COMPUTE SHADER: Generate textures on the GPU on the fly!
         // ---------------------------------------------------------------------
-        auto pipeline = app.create_pipeline(SHADER_SLANG_CODE);
+        auto compute_pipeline = app.create_compute_pipeline(COMPUTE_TEXTURE_GEN_SLANG);
 
-        VkDescriptorSet checkerboard_desc_set = pipeline.create_texture_descriptor_set(checkerboard_tex, 0, 0);
-        VkDescriptorSet grid_desc_set = pipeline.create_texture_descriptor_set(grid_tex, 0, 0);
+        // Create 2 storage images (256x256)
+        codotaku::TextureDesc tex_desc{
+            .format = VK_FORMAT_R8G8B8A8_UNORM,
+            .min_filter = VK_FILTER_LINEAR,
+            .mag_filter = VK_FILTER_LINEAR,
+        };
+        auto checkerboard_tex = codotaku::Texture::create_uninitialized(vk, 256, 256, tex_desc);
+        auto grid_tex = codotaku::Texture::create_uninitialized(vk, 256, 256, tex_desc);
+
+        VkDescriptorSet checkerboard_storage_set = compute_pipeline.create_storage_image_descriptor_set(checkerboard_tex.get_view(), 0, 0);
+        VkDescriptorSet grid_storage_set = compute_pipeline.create_storage_image_descriptor_set(grid_tex.get_view(), 0, 0);
+
+        // Execute compute dispatches on the GPU to generate both textures directly into VRAM
+        vk.execute_single_time_commands([&](VkCommandBuffer cmd) {
+            VkImageSubresourceRange range{
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            };
+
+            // Transition both images: UNDEFINED -> GENERAL
+            VkImageMemoryBarrier2 pre_barriers[2] = {
+                {
+                    .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                    .srcStageMask = VK_PIPELINE_STAGE_2_NONE,
+                    .srcAccessMask = VK_ACCESS_2_NONE,
+                    .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                    .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                    .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                    .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    .image = checkerboard_tex.get_image(),
+                    .subresourceRange = range,
+                },
+                {
+                    .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                    .srcStageMask = VK_PIPELINE_STAGE_2_NONE,
+                    .srcAccessMask = VK_ACCESS_2_NONE,
+                    .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                    .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                    .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                    .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    .image = grid_tex.get_image(),
+                    .subresourceRange = range,
+                }
+            };
+
+            VkDependencyInfo pre_dep{
+                .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                .imageMemoryBarrierCount = 2,
+                .pImageMemoryBarriers = pre_barriers,
+            };
+            vkCmdPipelineBarrier2(cmd, &pre_dep);
+
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compute_pipeline.get_pipeline());
+
+            // Dispatch 1: Generate Checkerboard (pattern_type = 0)
+            struct { uint32_t width, height, pattern_type; float time; } pc0 = { 256, 256, 0, 0.0f };
+            vkCmdPushConstants(cmd, compute_pipeline.get_layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc0), &pc0);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compute_pipeline.get_layout(), 0, 1, &checkerboard_storage_set, 0, nullptr);
+            vkCmdDispatch(cmd, 256 / 16, 256 / 16, 1);
+
+            // Dispatch 2: Generate Grid Pattern (pattern_type = 1)
+            struct { uint32_t width, height, pattern_type; float time; } pc1 = { 256, 256, 1, 0.0f };
+            vkCmdPushConstants(cmd, compute_pipeline.get_layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc1), &pc1);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compute_pipeline.get_layout(), 0, 1, &grid_storage_set, 0, nullptr);
+            vkCmdDispatch(cmd, 256 / 16, 256 / 16, 1);
+
+            // Transition both images: GENERAL -> SHADER_READ_ONLY_OPTIMAL for fragment sampling
+            VkImageMemoryBarrier2 post_barriers[2] = {
+                {
+                    .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                    .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                    .srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                    .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                    .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+                    .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+                    .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    .image = checkerboard_tex.get_image(),
+                    .subresourceRange = range,
+                },
+                {
+                    .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                    .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                    .srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                    .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                    .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+                    .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+                    .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    .image = grid_tex.get_image(),
+                    .subresourceRange = range,
+                }
+            };
+
+            VkDependencyInfo post_dep{
+                .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                .imageMemoryBarrierCount = 2,
+                .pImageMemoryBarriers = post_barriers,
+            };
+            vkCmdPipelineBarrier2(cmd, &post_dep);
+        });
+
+        compute_pipeline.cleanup();
+        std::println("[Main] Successfully generated textures on the fly using Slang compute shader!");
+
+        // ---------------------------------------------------------------------
+        // GRAPHICS PIPELINE & WINDOW CREATION
+        // ---------------------------------------------------------------------
+        auto graphics_pipeline = app.create_pipeline(GRAPHICS_SHADER_SLANG);
+
+        VkDescriptorSet checkerboard_sampled_set = graphics_pipeline.create_texture_descriptor_set(checkerboard_tex, 0, 0);
+        VkDescriptorSet grid_sampled_set = graphics_pipeline.create_texture_descriptor_set(grid_tex, 0, 0);
 
         codotaku::Camera camera({0.0f, 1.4f, 3.2f}, {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, 45.0f);
 
@@ -261,23 +373,17 @@ int main() {
         app.set_close_policy(codotaku::WindowClosePolicy::QuitOnLastWindowClose);
 
         app.create_window({
-            .title = "Window 1 (Primary, Triple Buffer, VSync ON, Checkerboard)",
+            .title = "Window 1 (Primary, Compute Checkerboard)",
             .width = 800,
             .height = 600,
             .buffer_count = 3,
             .present_mode = codotaku::PresentMode::Fifo,
-            .format_selector = [](std::span<const codotaku::ColorFormat> available) {
-                for (const auto& fmt : available) {
-                    if (fmt.vk_format == VK_FORMAT_B8G8R8A8_UNORM) return fmt;
-                }
-                return available.front();
-            },
             .attachments = { depth_desc },
             .is_primary = true,
         });
 
         app.create_window({
-            .title = "Window 2 (Double Buffer, Immediate, Grid Texture)",
+            .title = "Window 2 (Immediate, Compute Grid Pattern)",
             .width = 600,
             .height = 600,
             .buffer_count = 2,
@@ -293,24 +399,24 @@ int main() {
         });
 
         app.create_window({
-            .title = "Window 3 (Triple Buffer, VSync ON, Custom Close Hook)",
+            .title = "Window 3 (Compute Checkerboard, Custom Close Hook)",
             .width = 500,
             .height = 500,
             .buffer_count = 3,
             .present_mode = codotaku::PresentMode::Fifo,
             .attachments = { depth_desc },
             .on_close = [](codotaku::Window& win) {
-                std::println("[Custom Hook] Window '{}' close requested, accepting.", win.get_title());
+                std::println("[Custom Hook] Window '{}' intercepting close event.", win.get_title());
                 return true;
             },
         });
 
-        // 7. Wait on upload fence right before starting render loop (zero GPU wait stall!)
+        // Wait on geometry upload fence right before starting render loop
         uploader.wait();
 
         auto start_time = std::chrono::steady_clock::now();
 
-        // 8. Transparent Render Loop (User controls GBuffer attachments, recording & draw calls!)
+        // Transparent Render Loop
         int ret = app.run([&](codotaku::Window& window, codotaku::FrameContext& frame) {
             auto now = std::chrono::steady_clock::now();
             float time_sec = std::chrono::duration<float>(now - start_time).count();
@@ -353,20 +459,20 @@ int main() {
                 VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
                 VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
 
-            // Direct Vulkan Dynamic Rendering pass (using window color DMA-BUF + GBuffer depth!)
+            // Direct Vulkan Dynamic Rendering pass
             frame.begin_rendering_with_attachment({.float32 = {0.05f, 0.05f, 0.08f, 1.0f}}, 0, 1.0f);
             frame.set_viewport_and_scissor();
 
-            vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.get_pipeline());
+            vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, graphics_pipeline.get_pipeline());
 
             // Bind window texture descriptor set (Grid vs Checkerboard)
             VkDescriptorSet active_desc_set = (window.get_title().find("Grid") != std::string::npos)
-                                                  ? grid_desc_set
-                                                  : checkerboard_desc_set;
+                                                  ? grid_sampled_set
+                                                  : checkerboard_sampled_set;
             vkCmdBindDescriptorSets(
                 frame.cmd,
                 VK_PIPELINE_BIND_POINT_GRAPHICS,
-                pipeline.get_layout(),
+                graphics_pipeline.get_layout(),
                 0, 1,
                 &active_desc_set,
                 0, nullptr);
@@ -375,7 +481,7 @@ int main() {
             uint64_t scene_addr = scene_suballoc.device_address;
             vkCmdPushConstants(
                 frame.cmd,
-                pipeline.get_layout(),
+                graphics_pipeline.get_layout(),
                 VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                 0,
                 sizeof(uint64_t),
@@ -395,7 +501,7 @@ int main() {
         checkerboard_tex.cleanup();
         grid_tex.cleanup();
         geometry_arena.cleanup(vk.get_allocator());
-        pipeline.cleanup();
+        graphics_pipeline.cleanup();
         return ret;
 
     } catch (const std::exception& e) {

@@ -59,6 +59,13 @@ Pipeline Application::create_pipeline(
     return pipeline;
 }
 
+Pipeline Application::create_compute_pipeline(const char* slang_code) {
+    auto compiled_shaders = m_slang.compile_source(slang_code, "compute_pipeline");
+    Pipeline pipeline;
+    pipeline.init_compute(m_vulkan, compiled_shaders);
+    return pipeline;
+}
+
 bool Application::poll_events() {
     if ((m_close_policy != WindowClosePolicy::Manual && m_windows.empty()) || g_interrupted.load()) {
         return false;

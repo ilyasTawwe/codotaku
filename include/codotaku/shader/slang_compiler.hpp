@@ -25,7 +25,11 @@ struct ReflectedPipelineData {
 struct CompiledShaders {
     std::vector<uint32_t> vs_spirv;
     std::vector<uint32_t> fs_spirv;
+    std::vector<uint32_t> cs_spirv;
     ReflectedPipelineData reflection;
+
+    bool is_compute() const { return !cs_spirv.empty(); }
+    bool is_graphics() const { return !vs_spirv.empty() && !fs_spirv.empty(); }
 };
 
 class SlangCompiler {

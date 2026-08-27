@@ -40,18 +40,33 @@ CompiledShaders SlangCompiler::compile_source(const char* source_code, const cha
     Slang::ComPtr<slang::IEntryPoint> fs_entry;
     module->findEntryPointByName("fsMain", fs_entry.writeRef());
 
-    slang::IComponentType* components[] = { module.get(), vs_entry.get(), fs_entry.get() };
+    Slang::ComPtr<slang::IEntryPoint> cs_entry;
+    module->findEntryPointByName("csMain", cs_entry.writeRef());
+
+    std::vector<slang::IComponentType*> components;
+    components.push_back(module.get());
+
+    bool has_graphics = (vs_entry != nullptr && fs_entry != nullptr);
+    bool has_compute = (cs_entry != nullptr);
+
+    if (has_graphics) {
+        components.push_back(vs_entry.get());
+        components.push_back(fs_entry.get());
+    } else if (has_compute) {
+        components.push_back(cs_entry.get());
+    } else {
+        throw std::runtime_error("No valid entry points found in Slang source (expected vsMain+fsMain or csMain)");
+    }
+
     Slang::ComPtr<slang::IComponentType> program;
-    session->createCompositeComponentType(components, 3, program.writeRef(), diagnostic_blob.writeRef());
+    session->createCompositeComponentType(
+        components.data(),
+        static_cast<SlangInt>(components.size()),
+        program.writeRef(),
+        diagnostic_blob.writeRef());
 
     Slang::ComPtr<slang::IComponentType> linked_program;
     program->link(linked_program.writeRef(), diagnostic_blob.writeRef());
-
-    Slang::ComPtr<slang::IBlob> vs_blob;
-    linked_program->getEntryPointCode(0, 0, vs_blob.writeRef(), diagnostic_blob.writeRef());
-
-    Slang::ComPtr<slang::IBlob> fs_blob;
-    linked_program->getEntryPointCode(1, 0, fs_blob.writeRef(), diagnostic_blob.writeRef());
 
     CompiledShaders result{};
     auto copy_blob = [](slang::IBlob* blob, std::vector<uint32_t>& out) {
@@ -60,8 +75,20 @@ CompiledShaders SlangCompiler::compile_source(const char* source_code, const cha
         std::memcpy(out.data(), blob->getBufferPointer(), size_bytes);
     };
 
-    copy_blob(vs_blob.get(), result.vs_spirv);
-    copy_blob(fs_blob.get(), result.fs_spirv);
+    if (has_graphics) {
+        Slang::ComPtr<slang::IBlob> vs_blob;
+        linked_program->getEntryPointCode(0, 0, vs_blob.writeRef(), diagnostic_blob.writeRef());
+
+        Slang::ComPtr<slang::IBlob> fs_blob;
+        linked_program->getEntryPointCode(1, 0, fs_blob.writeRef(), diagnostic_blob.writeRef());
+
+        copy_blob(vs_blob.get(), result.vs_spirv);
+        copy_blob(fs_blob.get(), result.fs_spirv);
+    } else if (has_compute) {
+        Slang::ComPtr<slang::IBlob> cs_blob;
+        linked_program->getEntryPointCode(0, 0, cs_blob.writeRef(), diagnostic_blob.writeRef());
+        copy_blob(cs_blob.get(), result.cs_spirv);
+    }
 
     auto layout = linked_program->getLayout();
 
@@ -69,28 +96,49 @@ CompiledShaders SlangCompiler::compile_source(const char* source_code, const cha
     for (unsigned i = 0; i < layout->getParameterCount(); ++i) {
         auto param = layout->getParameterByIndex(i);
         auto category = param->getCategory();
+
         if (category == slang::ParameterCategory::PushConstantBuffer) {
-            uint32_t size = sizeof(uint64_t); // 8 bytes for BDA pointer
+            auto type_layout = param->getTypeLayout();
+            auto elem_layout = type_layout->getElementTypeLayout();
+            uint32_t size = elem_layout ? static_cast<uint32_t>(elem_layout->getSize(slang::ParameterCategory::Uniform))
+                                        : static_cast<uint32_t>(type_layout->getSize(slang::ParameterCategory::Uniform));
+            if (size == 0) {
+                size = 8; // fallback for 64-bit BDA pointer struct
+            }
+
+            VkShaderStageFlags stages = has_compute
+                                            ? VK_SHADER_STAGE_COMPUTE_BIT
+                                            : (VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
 
             result.reflection.push_constants.push_back({
-                .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                .stageFlags = stages,
                 .offset = 0,
                 .size = size,
             });
-            std::println("  [Slang Reflection] Push Constant Range: size={} bytes", size);
+            std::println("  [Slang Reflection] Push Constant Range: name='{}', size={} bytes", param->getName(), size);
         } else {
             uint32_t set = static_cast<uint32_t>(param->getBindingSpace());
             uint32_t binding = static_cast<uint32_t>(param->getBindingIndex());
 
+            auto type = param->getTypeLayout()->getType();
+            auto access = type->getResourceAccess();
+
+            VkDescriptorType desc_type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            if (access == SLANG_RESOURCE_ACCESS_READ_WRITE || access == SLANG_RESOURCE_ACCESS_WRITE) {
+                desc_type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+            }
+
+            VkShaderStageFlags stage_flags = has_compute ? VK_SHADER_STAGE_COMPUTE_BIT : VK_SHADER_STAGE_ALL_GRAPHICS;
+
             result.reflection.descriptor_sets[set].push_back({
                 .set = set,
                 .binding = binding,
-                .descriptor_type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                .stage_flags = VK_SHADER_STAGE_ALL_GRAPHICS,
+                .descriptor_type = desc_type,
+                .stage_flags = stage_flags,
             });
 
-            std::println("  [Slang Reflection] Descriptor Binding: Set {}, Binding {}, Type CombinedImageSampler",
-                set, binding);
+            std::println("  [Slang Reflection] Descriptor Binding: Set {}, Binding {}, Type {}",
+                set, binding, (desc_type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE ? "StorageImage" : "CombinedImageSampler"));
         }
     }
 

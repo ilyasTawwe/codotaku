@@ -19,6 +19,7 @@ public:
     Pipeline(Pipeline&& other) noexcept;
     Pipeline& operator=(Pipeline&& other) noexcept;
 
+    // Initialize Graphics Dynamic Rendering Pipeline
     void init_dynamic_rendering_bda(
         VulkanContext& vk,
         const CompiledShaders& shaders,
@@ -27,7 +28,14 @@ public:
         VkCullModeFlags cull_mode = VK_CULL_MODE_BACK_BIT,
         VkFrontFace front_face = VK_FRONT_FACE_COUNTER_CLOCKWISE);
 
+    // Initialize Compute Pipeline
+    void init_compute(
+        VulkanContext& vk,
+        const CompiledShaders& shaders);
+
+    // Descriptor Set Allocations
     VkDescriptorSet create_texture_descriptor_set(const Texture& texture, uint32_t set_index = 0, uint32_t binding_index = 0) const;
+    VkDescriptorSet create_storage_image_descriptor_set(VkImageView image_view, uint32_t set_index = 0, uint32_t binding_index = 0) const;
 
     void cleanup();
 
@@ -36,6 +44,8 @@ public:
     VkDescriptorSetLayout get_descriptor_set_layout(uint32_t set_index = 0) const;
 
 private:
+    void create_descriptor_infrastructure(const CompiledShaders& shaders);
+
     VkDevice m_device{VK_NULL_HANDLE};
     VkPipeline m_pipeline{VK_NULL_HANDLE};
     VkPipelineLayout m_layout{VK_NULL_HANDLE};

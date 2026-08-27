@@ -14,6 +14,7 @@ struct TextureDesc {
     uint32_t width{1};
     uint32_t height{1};
     VkFormat format{VK_FORMAT_R8G8B8A8_UNORM};
+    VkImageUsageFlags usage{VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT};
     VkFilter min_filter{VK_FILTER_LINEAR};
     VkFilter mag_filter{VK_FILTER_LINEAR};
     VkSamplerAddressMode address_mode{VK_SAMPLER_ADDRESS_MODE_REPEAT};

@@ -38,6 +38,8 @@ public:
         VkCullModeFlags cull_mode = VK_CULL_MODE_BACK_BIT,
         VkFrontFace front_face = VK_FRONT_FACE_COUNTER_CLOCKWISE);
 
+    Pipeline create_compute_pipeline(const char* slang_code);
+
     bool poll_events();
 
     using RenderCallback = std::function<void(Window& window, FrameContext& frame)>;
