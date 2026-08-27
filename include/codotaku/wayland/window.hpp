@@ -41,6 +41,7 @@ struct FrameContext {
     size_t buffer_index{0};
     GpuBufferArena& frame_arena;
     GBuffer& gbuffer;
+    const VolkDeviceTable& vkd;
 
     void begin_rendering(VkClearColorValue clear_color, VkImageView depth_view = VK_NULL_HANDLE, float clear_depth = 1.0f) const;
     void begin_rendering_with_attachment(VkClearColorValue clear_color, uint32_t depth_attachment_id, float clear_depth = 1.0f) const;

@@ -13,14 +13,14 @@ Pipeline::~Pipeline() {
 
 Pipeline::Pipeline(Pipeline&& other) noexcept
     : m_device(std::exchange(other.m_device, VK_NULL_HANDLE)),
-      m_table(other.m_table),
+      m_vkd(other.m_vkd),
       m_pipeline(std::exchange(other.m_pipeline, VK_NULL_HANDLE)) {}
 
 Pipeline& Pipeline::operator=(Pipeline&& other) noexcept {
     if (this != &other) {
         cleanup();
         m_device = std::exchange(other.m_device, VK_NULL_HANDLE);
-        m_table = other.m_table;
+        m_vkd = other.m_vkd;
         m_pipeline = std::exchange(other.m_pipeline, VK_NULL_HANDLE);
     }
     return *this;
@@ -78,10 +78,10 @@ void Pipeline::init_dynamic_rendering_bda(
     const char* debug_name) {
     cleanup();
     m_device = vk.get_device();
-    m_table = vk.get_table();
+    m_vkd = vk.vkd();
 
-    VkShaderModule vs_module = create_shader_module(m_device, shaders.vs_spirv);
-    VkShaderModule fs_module = create_shader_module(m_device, shaders.fs_spirv);
+    VkShaderModule vs_module = create_shader_module(m_vkd, m_device, shaders.vs_spirv);
+    VkShaderModule fs_module = create_shader_module(m_vkd, m_device, shaders.fs_spirv);
 
     std::vector<VkDescriptorSetAndBindingMappingEXT> vk_mappings;
     for (const auto& m : mappings) {
@@ -273,7 +273,7 @@ void Pipeline::init_dynamic_rendering_bda(
         .basePipelineIndex = -1,
     };
 
-    if (m_table.vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &m_pipeline) != VK_SUCCESS) {
+    if (m_vkd.vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &m_pipeline) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create graphics pipeline with VK_EXT_descriptor_heap");
     }
 
@@ -281,8 +281,8 @@ void Pipeline::init_dynamic_rendering_bda(
         vk.set_name(m_pipeline, debug_name);
     }
 
-    m_table.vkDestroyShaderModule(m_device, fs_module, nullptr);
-    m_table.vkDestroyShaderModule(m_device, vs_module, nullptr);
+    m_vkd.vkDestroyShaderModule(m_device, fs_module, nullptr);
+    m_vkd.vkDestroyShaderModule(m_device, vs_module, nullptr);
 }
 
 void Pipeline::init_compute(
@@ -292,9 +292,9 @@ void Pipeline::init_compute(
     const char* debug_name) {
     cleanup();
     m_device = vk.get_device();
-    m_table = vk.get_table();
+    m_vkd = vk.vkd();
 
-    VkShaderModule cs_module = create_shader_module(m_device, shaders.cs_spirv);
+    VkShaderModule cs_module = create_shader_module(m_vkd, m_device, shaders.cs_spirv);
 
     std::vector<VkDescriptorSetAndBindingMappingEXT> vk_mappings;
     for (const auto& m : mappings) {
@@ -343,7 +343,7 @@ void Pipeline::init_compute(
         .basePipelineIndex = -1,
     };
 
-    if (m_table.vkCreateComputePipelines(m_device, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &m_pipeline) != VK_SUCCESS) {
+    if (m_vkd.vkCreateComputePipelines(m_device, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &m_pipeline) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create compute pipeline with VK_EXT_descriptor_heap");
     }
 
@@ -351,15 +351,15 @@ void Pipeline::init_compute(
         vk.set_name(m_pipeline, debug_name);
     }
 
-    m_table.vkDestroyShaderModule(m_device, cs_module, nullptr);
+    m_vkd.vkDestroyShaderModule(m_device, cs_module, nullptr);
 }
 
 void Pipeline::cleanup() {
     if (m_device != VK_NULL_HANDLE) {
-        m_table.vkDeviceWaitIdle(m_device);
+        m_vkd.vkDeviceWaitIdle(m_device);
 
         if (m_pipeline != VK_NULL_HANDLE) {
-            m_table.vkDestroyPipeline(m_device, m_pipeline, nullptr);
+            m_vkd.vkDestroyPipeline(m_device, m_pipeline, nullptr);
             m_pipeline = VK_NULL_HANDLE;
         }
         m_device = VK_NULL_HANDLE;

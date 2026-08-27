@@ -31,7 +31,39 @@ void GpuBufferArena::init(
     VkBufferUsageFlags usage,
     VmaAllocationCreateFlags vma_flags,
     const char* debug_name) {
-    init(vk.get_allocator(), vk.get_device(), size, usage, vma_flags);
+    m_total_size = size;
+
+    VkBufferCreateInfo buffer_info{
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .size = size,
+        .usage = usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+    };
+
+    VmaAllocationCreateInfo alloc_info{
+        .flags = vma_flags,
+        .usage = VMA_MEMORY_USAGE_AUTO,
+    };
+
+    VmaAllocationInfo allocation_info{};
+    if (vmaCreateBuffer(vk.get_allocator(), &buffer_info, &alloc_info, &m_buffer, &m_allocation, &allocation_info) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to allocate GPU Buffer Arena via VMA");
+    }
+
+    m_mapped_data = allocation_info.pMappedData;
+    m_base_address = vk.get_buffer_device_address(m_buffer);
+
+    VmaVirtualBlockCreateInfo block_info{
+        .size = size,
+        .flags = 0,
+        .pAllocationCallbacks = nullptr,
+    };
+    if (vmaCreateVirtualBlock(&block_info, &m_virtual_block) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create VMA Virtual Block for GPU Buffer Arena");
+    }
+
     if (debug_name) {
         vk.set_name(m_buffer, debug_name);
     }

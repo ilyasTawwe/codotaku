@@ -304,22 +304,22 @@ int main() {
                 .imageMemoryBarrierCount = 2,
                 .pImageMemoryBarriers = pre_barriers,
             };
-            vkCmdPipelineBarrier2(cmd, &pre_dep);
+            vk.vkd().vkCmdPipelineBarrier2(cmd, &pre_dep);
 
             // Bind Global Descriptor Heaps
             app.get_descriptor_heap().bind(cmd);
 
             // Dispatch 1: Generate Checkerboard (pattern_type = 0)
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compute_pipeline_checker.get_pipeline());
+            vk.vkd().vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compute_pipeline_checker.get_pipeline());
             struct { uint32_t width, height, pattern_type; float time; } pc0 = { 256, 256, 0, 0.0f };
-            codotaku::DescriptorHeap::push_data(cmd, pc0);
-            vkCmdDispatch(cmd, 256 / 16, 256 / 16, 1);
+            app.get_descriptor_heap().push_data(cmd, pc0);
+            vk.vkd().vkCmdDispatch(cmd, 256 / 16, 256 / 16, 1);
 
             // Dispatch 2: Generate Grid Pattern (pattern_type = 1)
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compute_pipeline_grid.get_pipeline());
+            vk.vkd().vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compute_pipeline_grid.get_pipeline());
             struct { uint32_t width, height, pattern_type; float time; } pc1 = { 256, 256, 1, 0.0f };
-            codotaku::DescriptorHeap::push_data(cmd, pc1);
-            vkCmdDispatch(cmd, 256 / 16, 256 / 16, 1);
+            app.get_descriptor_heap().push_data(cmd, pc1);
+            vk.vkd().vkCmdDispatch(cmd, 256 / 16, 256 / 16, 1);
 
             // Coalesced memory barrier: Ensures compute storage image writes are visible to fragment shader sampling
             VkMemoryBarrier2 compute_to_graphics_barrier{
@@ -335,7 +335,7 @@ int main() {
                 .memoryBarrierCount = 1,
                 .pMemoryBarriers = &compute_to_graphics_barrier,
             };
-            vkCmdPipelineBarrier2(cmd, &post_dep);
+            vk.vkd().vkCmdPipelineBarrier2(cmd, &post_dep);
         });
 
         compute_pipeline_checker.cleanup();
@@ -454,17 +454,17 @@ int main() {
             app.get_descriptor_heap().bind(frame.cmd);
 
             bool is_grid = (window.get_title().find("Grid") != std::string::npos);
-            vkCmdBindPipeline(
+            frame.vkd.vkCmdBindPipeline(
                 frame.cmd,
                 VK_PIPELINE_BIND_POINT_GRAPHICS,
                 is_grid ? graphics_pipeline_grid.get_pipeline() : graphics_pipeline_checker.get_pipeline());
 
             // Push 8-byte Root Scene BDA address via VK_EXT_descriptor_heap Push Data!
             uint64_t scene_addr = scene_suballoc.device_address;
-            codotaku::DescriptorHeap::push_data(frame.cmd, scene_addr);
+            app.get_descriptor_heap().push_data(frame.cmd, scene_addr);
 
             // GPU-Driven Indirect Draw!
-            vkCmdDrawIndirect(
+            frame.vkd.vkCmdDrawIndirect(
                 frame.cmd,
                 geometry_arena.get_buffer(),
                 cmd_sub.offset,

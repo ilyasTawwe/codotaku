@@ -79,7 +79,7 @@ void GBuffer::init(VulkanDevice& vk, uint32_t default_width, uint32_t default_he
 
 void GBuffer::cleanup() {
     if (m_device != VK_NULL_HANDLE && m_allocator != VK_NULL_HANDLE) {
-        if (m_vk) m_vk->get_table().vkDeviceWaitIdle(m_device);
+        if (m_vk) m_vk->vkd().vkDeviceWaitIdle(m_device);
         for (auto& att : m_attachments) {
             if (att.active) {
                 free_attachment_resources(att);
@@ -150,7 +150,7 @@ void GBuffer::resize(uint32_t id, uint32_t new_width, uint32_t new_height) {
     if (att.width == new_width && att.height == new_height) return;
 
     if (m_device != VK_NULL_HANDLE && m_vk) {
-        m_vk->get_table().vkDeviceWaitIdle(m_device);
+        m_vk->vkd().vkDeviceWaitIdle(m_device);
     }
 
     free_attachment_resources(att);
@@ -165,7 +165,7 @@ void GBuffer::resize_all(uint32_t new_width, uint32_t new_height) {
     m_default_height = new_height;
 
     if (m_device != VK_NULL_HANDLE && m_vk) {
-        m_vk->get_table().vkDeviceWaitIdle(m_device);
+        m_vk->vkd().vkDeviceWaitIdle(m_device);
     }
 
     for (auto& att : m_attachments) {
@@ -273,7 +273,7 @@ void GBuffer::transition(
     };
 
     if (m_vk) {
-        m_vk->get_table().vkCmdPipelineBarrier2(cmd, &dep_info);
+        m_vk->vkd().vkCmdPipelineBarrier2(cmd, &dep_info);
     }
     att.current_layout = new_layout;
 }
@@ -331,7 +331,7 @@ void GBuffer::allocate_attachment_resources(Attachment& att) {
         },
     };
 
-    if (m_vk->get_table().vkCreateImageView(m_device, &view_info, nullptr, &att.view) != VK_SUCCESS) {
+    if (m_vk->vkd().vkCreateImageView(m_device, &view_info, nullptr, &att.view) != VK_SUCCESS) {
         vmaDestroyImage(m_allocator, att.image, att.allocation);
         att.image = VK_NULL_HANDLE;
         att.allocation = VK_NULL_HANDLE;
@@ -373,7 +373,7 @@ void GBuffer::allocate_attachment_resources(Attachment& att) {
                 .imageMemoryBarrierCount = 1,
                 .pImageMemoryBarriers = &init_barrier,
             };
-            m_vk->get_table().vkCmdPipelineBarrier2(cmd, &dep);
+            m_vk->vkd().vkCmdPipelineBarrier2(cmd, &dep);
         });
     }
 
@@ -382,7 +382,7 @@ void GBuffer::allocate_attachment_resources(Attachment& att) {
 
 void GBuffer::free_attachment_resources(Attachment& att) {
     if (att.view != VK_NULL_HANDLE) {
-        if (m_vk) m_vk->get_table().vkDestroyImageView(m_device, att.view, nullptr);
+        if (m_vk) m_vk->vkd().vkDestroyImageView(m_device, att.view, nullptr);
         att.view = VK_NULL_HANDLE;
     }
     if (att.image != VK_NULL_HANDLE) {

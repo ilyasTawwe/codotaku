@@ -38,7 +38,11 @@ VulkanDevice::~VulkanDevice() {
 VulkanDevice::VulkanDevice(VulkanDevice&& other) noexcept
     : m_physical_device(std::exchange(other.m_physical_device, VK_NULL_HANDLE)),
       m_device(std::exchange(other.m_device, VK_NULL_HANDLE)),
-      m_table(other.m_table),
+      m_vkd(other.m_vkd),
+      m_pfnSetDebugUtilsObjectNameEXT(other.m_pfnSetDebugUtilsObjectNameEXT),
+      m_pfnCmdBeginDebugUtilsLabelEXT(other.m_pfnCmdBeginDebugUtilsLabelEXT),
+      m_pfnCmdEndDebugUtilsLabelEXT(other.m_pfnCmdEndDebugUtilsLabelEXT),
+      m_pfnCmdInsertDebugUtilsLabelEXT(other.m_pfnCmdInsertDebugUtilsLabelEXT),
       m_allocator(std::exchange(other.m_allocator, VK_NULL_HANDLE)),
       m_graphics_queue(std::exchange(other.m_graphics_queue, {})),
       m_transfer_queue(std::exchange(other.m_transfer_queue, {})),
@@ -58,7 +62,11 @@ VulkanDevice& VulkanDevice::operator=(VulkanDevice&& other) noexcept {
         cleanup();
         m_physical_device = std::exchange(other.m_physical_device, VK_NULL_HANDLE);
         m_device = std::exchange(other.m_device, VK_NULL_HANDLE);
-        m_table = other.m_table;
+        m_vkd = other.m_vkd;
+        m_pfnSetDebugUtilsObjectNameEXT = other.m_pfnSetDebugUtilsObjectNameEXT;
+        m_pfnCmdBeginDebugUtilsLabelEXT = other.m_pfnCmdBeginDebugUtilsLabelEXT;
+        m_pfnCmdEndDebugUtilsLabelEXT = other.m_pfnCmdEndDebugUtilsLabelEXT;
+        m_pfnCmdInsertDebugUtilsLabelEXT = other.m_pfnCmdInsertDebugUtilsLabelEXT;
         m_allocator = std::exchange(other.m_allocator, VK_NULL_HANDLE);
         m_graphics_queue = std::exchange(other.m_graphics_queue, {});
         m_transfer_queue = std::exchange(other.m_transfer_queue, {});
@@ -89,12 +97,12 @@ void VulkanDevice::select_physical_device(VulkanInstance& instance, VkPhysicalDe
         VkPhysicalDevice fallback_gpu = VK_NULL_HANDLE;
         for (auto pdev : devices) {
             VkPhysicalDeviceProperties props;
-            instance.get_table().vkGetPhysicalDeviceProperties(pdev, &props);
+            instance.vki().vkGetPhysicalDeviceProperties(pdev, &props);
 
             uint32_t qf_count = 0;
-            instance.get_table().vkGetPhysicalDeviceQueueFamilyProperties(pdev, &qf_count, nullptr);
+            instance.vki().vkGetPhysicalDeviceQueueFamilyProperties(pdev, &qf_count, nullptr);
             std::vector<VkQueueFamilyProperties> qf_props(qf_count);
-            instance.get_table().vkGetPhysicalDeviceQueueFamilyProperties(pdev, &qf_count, qf_props.data());
+            instance.vki().vkGetPhysicalDeviceQueueFamilyProperties(pdev, &qf_count, qf_props.data());
 
             bool has_graphics = false;
             for (const auto& qf : qf_props) {
@@ -123,7 +131,7 @@ void VulkanDevice::select_physical_device(VulkanInstance& instance, VkPhysicalDe
         throw std::runtime_error("Failed to find a suitable GPU with Graphics support");
     }
 
-    instance.get_table().vkGetPhysicalDeviceMemoryProperties(m_physical_device, &m_memory_properties);
+    instance.vki().vkGetPhysicalDeviceMemoryProperties(m_physical_device, &m_memory_properties);
 
     // Query Physical Device Properties, DRM properties, Descriptor Heap Properties & Alignment Limits
     m_drm_properties = {
@@ -137,7 +145,7 @@ void VulkanDevice::select_physical_device(VulkanInstance& instance, VkPhysicalDe
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
         .pNext = &m_descriptor_heap_properties,
     };
-    instance.get_table().vkGetPhysicalDeviceProperties2(m_physical_device, &props2);
+    instance.vki().vkGetPhysicalDeviceProperties2(m_physical_device, &props2);
 
     m_alignment_limits.min_storage_buffer_offset_alignment = props2.properties.limits.minStorageBufferOffsetAlignment;
     m_alignment_limits.min_uniform_buffer_offset_alignment = props2.properties.limits.minUniformBufferOffsetAlignment;
@@ -193,9 +201,9 @@ void VulkanDevice::setup_drm_and_gbm() {
 
 void VulkanDevice::create_logical_device(VulkanInstance& instance) {
     uint32_t queue_family_count = 0;
-    instance.get_table().vkGetPhysicalDeviceQueueFamilyProperties(m_physical_device, &queue_family_count, nullptr);
+    instance.vki().vkGetPhysicalDeviceQueueFamilyProperties(m_physical_device, &queue_family_count, nullptr);
     std::vector<VkQueueFamilyProperties> queue_families(queue_family_count);
-    instance.get_table().vkGetPhysicalDeviceQueueFamilyProperties(m_physical_device, &queue_family_count, queue_families.data());
+    instance.vki().vkGetPhysicalDeviceQueueFamilyProperties(m_physical_device, &queue_family_count, queue_families.data());
 
     int graphics_family = -1;
     int transfer_family = -1;
@@ -271,9 +279,9 @@ void VulkanDevice::create_logical_device(VulkanInstance& instance) {
 
     // Available device extensions check
     uint32_t ext_count = 0;
-    instance.get_table().vkEnumerateDeviceExtensionProperties(m_physical_device, nullptr, &ext_count, nullptr);
+    instance.vki().vkEnumerateDeviceExtensionProperties(m_physical_device, nullptr, &ext_count, nullptr);
     std::vector<VkExtensionProperties> available_exts(ext_count);
-    instance.get_table().vkEnumerateDeviceExtensionProperties(m_physical_device, nullptr, &ext_count, available_exts.data());
+    instance.vki().vkEnumerateDeviceExtensionProperties(m_physical_device, nullptr, &ext_count, available_exts.data());
 
     std::vector<const char*> device_extensions;
     auto enable_dev_ext = [&](const char* ext_name) {
@@ -354,12 +362,12 @@ void VulkanDevice::create_logical_device(VulkanInstance& instance) {
         .pEnabledFeatures = &features,
     };
 
-    if (instance.get_table().vkCreateDevice(m_physical_device, &device_create_info, nullptr, &m_device) != VK_SUCCESS) {
+    if (instance.vki().vkCreateDevice(m_physical_device, &device_create_info, nullptr, &m_device) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create Vulkan logical device");
     }
 
     // Load device-level dispatch table
-    volkLoadDeviceTable(&m_table, m_device);
+    volkLoadDeviceTable(&m_vkd, m_device);
 
     m_pfnSetDebugUtilsObjectNameEXT = reinterpret_cast<PFN_vkSetDebugUtilsObjectNameEXT>(
         vkGetDeviceProcAddr(m_device, "vkSetDebugUtilsObjectNameEXT"));
@@ -374,26 +382,26 @@ void VulkanDevice::create_logical_device(VulkanInstance& instance) {
     m_graphics_queue.family_index = static_cast<uint32_t>(graphics_family);
     m_graphics_queue.queue_index = 0;
     m_graphics_queue.is_dedicated = false;
-    m_table.vkGetDeviceQueue(m_device, m_graphics_queue.family_index, 0, &m_graphics_queue.handle);
+    m_vkd.vkGetDeviceQueue(m_device, m_graphics_queue.family_index, 0, &m_graphics_queue.handle);
     set_name(m_graphics_queue.handle, "Main Graphics Queue");
 
     m_transfer_queue.family_index = static_cast<uint32_t>(transfer_family);
     m_transfer_queue.queue_index = 0;
     m_transfer_queue.is_dedicated = (transfer_family != graphics_family);
-    m_table.vkGetDeviceQueue(m_device, m_transfer_queue.family_index, 0, &m_transfer_queue.handle);
+    m_vkd.vkGetDeviceQueue(m_device, m_transfer_queue.family_index, 0, &m_transfer_queue.handle);
     set_name(m_transfer_queue.handle, "Dedicated Transfer DMA Queue");
 
     m_compute_queue.family_index = static_cast<uint32_t>(compute_family);
     m_compute_queue.queue_index = 0;
     m_compute_queue.is_dedicated = (compute_family != graphics_family);
-    m_table.vkGetDeviceQueue(m_device, m_compute_queue.family_index, 0, &m_compute_queue.handle);
+    m_vkd.vkGetDeviceQueue(m_device, m_compute_queue.family_index, 0, &m_compute_queue.handle);
     set_name(m_compute_queue.handle, "Async Compute Queue");
 
     if (video_decode_family != -1) {
         m_video_decode_queue.family_index = static_cast<uint32_t>(video_decode_family);
         m_video_decode_queue.queue_index = 0;
         m_video_decode_queue.is_dedicated = true;
-        m_table.vkGetDeviceQueue(m_device, m_video_decode_queue.family_index, 0, &m_video_decode_queue.handle);
+        m_vkd.vkGetDeviceQueue(m_device, m_video_decode_queue.family_index, 0, &m_video_decode_queue.handle);
         set_name(m_video_decode_queue.handle, "Vulkan Video Decode Queue");
     }
 
@@ -401,7 +409,7 @@ void VulkanDevice::create_logical_device(VulkanInstance& instance) {
         m_video_encode_queue.family_index = static_cast<uint32_t>(video_encode_family);
         m_video_encode_queue.queue_index = 0;
         m_video_encode_queue.is_dedicated = true;
-        m_table.vkGetDeviceQueue(m_device, m_video_encode_queue.family_index, 0, &m_video_encode_queue.handle);
+        m_vkd.vkGetDeviceQueue(m_device, m_video_encode_queue.family_index, 0, &m_video_encode_queue.handle);
         set_name(m_video_encode_queue.handle, "Vulkan Video Encode Queue");
     }
 
@@ -413,31 +421,31 @@ void VulkanDevice::init_vma(VulkanInstance& instance) {
     VmaVulkanFunctions vulkan_functions{};
     vulkan_functions.vkGetInstanceProcAddr = vkGetInstanceProcAddr;
     vulkan_functions.vkGetDeviceProcAddr = vkGetDeviceProcAddr;
-    vulkan_functions.vkGetPhysicalDeviceProperties = instance.get_table().vkGetPhysicalDeviceProperties;
-    vulkan_functions.vkGetPhysicalDeviceMemoryProperties = instance.get_table().vkGetPhysicalDeviceMemoryProperties;
-    vulkan_functions.vkAllocateMemory = m_table.vkAllocateMemory;
-    vulkan_functions.vkFreeMemory = m_table.vkFreeMemory;
-    vulkan_functions.vkMapMemory = m_table.vkMapMemory;
-    vulkan_functions.vkUnmapMemory = m_table.vkUnmapMemory;
-    vulkan_functions.vkFlushMappedMemoryRanges = m_table.vkFlushMappedMemoryRanges;
-    vulkan_functions.vkInvalidateMappedMemoryRanges = m_table.vkInvalidateMappedMemoryRanges;
-    vulkan_functions.vkBindBufferMemory = m_table.vkBindBufferMemory;
-    vulkan_functions.vkBindImageMemory = m_table.vkBindImageMemory;
-    vulkan_functions.vkGetBufferMemoryRequirements = m_table.vkGetBufferMemoryRequirements;
-    vulkan_functions.vkGetImageMemoryRequirements = m_table.vkGetImageMemoryRequirements;
-    vulkan_functions.vkCreateBuffer = m_table.vkCreateBuffer;
-    vulkan_functions.vkDestroyBuffer = m_table.vkDestroyBuffer;
-    vulkan_functions.vkCreateImage = m_table.vkCreateImage;
-    vulkan_functions.vkDestroyImage = m_table.vkDestroyImage;
-    vulkan_functions.vkCmdCopyBuffer = m_table.vkCmdCopyBuffer;
-    vulkan_functions.vkGetBufferMemoryRequirements2KHR = m_table.vkGetBufferMemoryRequirements2;
-    vulkan_functions.vkGetImageMemoryRequirements2KHR = m_table.vkGetImageMemoryRequirements2;
-    vulkan_functions.vkBindBufferMemory2KHR = m_table.vkBindBufferMemory2;
-    vulkan_functions.vkBindImageMemory2KHR = m_table.vkBindImageMemory2;
-    vulkan_functions.vkGetPhysicalDeviceMemoryProperties2KHR = instance.get_table().vkGetPhysicalDeviceMemoryProperties2;
-    vulkan_functions.vkGetPhysicalDeviceProperties2KHR = instance.get_table().vkGetPhysicalDeviceProperties2;
-    vulkan_functions.vkGetDeviceBufferMemoryRequirements = m_table.vkGetDeviceBufferMemoryRequirements;
-    vulkan_functions.vkGetDeviceImageMemoryRequirements = m_table.vkGetDeviceImageMemoryRequirements;
+    vulkan_functions.vkGetPhysicalDeviceProperties = instance.get_vki().vkGetPhysicalDeviceProperties;
+    vulkan_functions.vkGetPhysicalDeviceMemoryProperties = instance.get_vki().vkGetPhysicalDeviceMemoryProperties;
+    vulkan_functions.vkAllocateMemory = m_vkd.vkAllocateMemory;
+    vulkan_functions.vkFreeMemory = m_vkd.vkFreeMemory;
+    vulkan_functions.vkMapMemory = m_vkd.vkMapMemory;
+    vulkan_functions.vkUnmapMemory = m_vkd.vkUnmapMemory;
+    vulkan_functions.vkFlushMappedMemoryRanges = m_vkd.vkFlushMappedMemoryRanges;
+    vulkan_functions.vkInvalidateMappedMemoryRanges = m_vkd.vkInvalidateMappedMemoryRanges;
+    vulkan_functions.vkBindBufferMemory = m_vkd.vkBindBufferMemory;
+    vulkan_functions.vkBindImageMemory = m_vkd.vkBindImageMemory;
+    vulkan_functions.vkGetBufferMemoryRequirements = m_vkd.vkGetBufferMemoryRequirements;
+    vulkan_functions.vkGetImageMemoryRequirements = m_vkd.vkGetImageMemoryRequirements;
+    vulkan_functions.vkCreateBuffer = m_vkd.vkCreateBuffer;
+    vulkan_functions.vkDestroyBuffer = m_vkd.vkDestroyBuffer;
+    vulkan_functions.vkCreateImage = m_vkd.vkCreateImage;
+    vulkan_functions.vkDestroyImage = m_vkd.vkDestroyImage;
+    vulkan_functions.vkCmdCopyBuffer = m_vkd.vkCmdCopyBuffer;
+    vulkan_functions.vkGetBufferMemoryRequirements2KHR = m_vkd.vkGetBufferMemoryRequirements2;
+    vulkan_functions.vkGetImageMemoryRequirements2KHR = m_vkd.vkGetImageMemoryRequirements2;
+    vulkan_functions.vkBindBufferMemory2KHR = m_vkd.vkBindBufferMemory2;
+    vulkan_functions.vkBindImageMemory2KHR = m_vkd.vkBindImageMemory2;
+    vulkan_functions.vkGetPhysicalDeviceMemoryProperties2KHR = instance.get_vki().vkGetPhysicalDeviceMemoryProperties2;
+    vulkan_functions.vkGetPhysicalDeviceProperties2KHR = instance.get_vki().vkGetPhysicalDeviceProperties2;
+    vulkan_functions.vkGetDeviceBufferMemoryRequirements = m_vkd.vkGetDeviceBufferMemoryRequirements;
+    vulkan_functions.vkGetDeviceImageMemoryRequirements = m_vkd.vkGetDeviceImageMemoryRequirements;
 
     VmaAllocatorCreateInfo allocator_info{
         .flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT,
@@ -489,7 +497,7 @@ VkDeviceAddress VulkanDevice::get_buffer_device_address(VkBuffer buffer) const {
         .pNext = nullptr,
         .buffer = buffer,
     };
-    return m_table.vkGetBufferDeviceAddress(m_device, &info);
+    return m_vkd.vkGetBufferDeviceAddress(m_device, &info);
 }
 
 void VulkanDevice::execute_single_time_commands(
@@ -505,7 +513,7 @@ void VulkanDevice::execute_single_time_commands(
     };
 
     VkCommandPool pool = VK_NULL_HANDLE;
-    if (m_table.vkCreateCommandPool(m_device, &pool_info, nullptr, &pool) != VK_SUCCESS) {
+    if (m_vkd.vkCreateCommandPool(m_device, &pool_info, nullptr, &pool) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create single time command pool");
     }
 
@@ -518,7 +526,7 @@ void VulkanDevice::execute_single_time_commands(
     };
 
     VkCommandBuffer cmd = VK_NULL_HANDLE;
-    m_table.vkAllocateCommandBuffers(m_device, &alloc_info, &cmd);
+    m_vkd.vkAllocateCommandBuffers(m_device, &alloc_info, &cmd);
 
     VkCommandBufferBeginInfo begin_info{
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -526,11 +534,11 @@ void VulkanDevice::execute_single_time_commands(
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
         .pInheritanceInfo = nullptr,
     };
-    m_table.vkBeginCommandBuffer(cmd, &begin_info);
+    m_vkd.vkBeginCommandBuffer(cmd, &begin_info);
 
     record_fn(cmd);
 
-    m_table.vkEndCommandBuffer(cmd);
+    m_vkd.vkEndCommandBuffer(cmd);
 
     VkSubmitInfo submit_info{
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
@@ -544,10 +552,10 @@ void VulkanDevice::execute_single_time_commands(
         .pSignalSemaphores = nullptr,
     };
 
-    m_table.vkQueueSubmit(queue_info.handle, 1, &submit_info, VK_NULL_HANDLE);
-    m_table.vkQueueWaitIdle(queue_info.handle);
+    m_vkd.vkQueueSubmit(queue_info.handle, 1, &submit_info, VK_NULL_HANDLE);
+    m_vkd.vkQueueWaitIdle(queue_info.handle);
 
-    m_table.vkDestroyCommandPool(m_device, pool, nullptr);
+    m_vkd.vkDestroyCommandPool(m_device, pool, nullptr);
 }
 
 void VulkanDevice::set_debug_name(VkObjectType type, uint64_t handle, const char* name) const {
@@ -595,14 +603,14 @@ void VulkanDevice::insert_debug_label(VkCommandBuffer cmd, const char* label_nam
 
 void VulkanDevice::cleanup() {
     if (m_device != VK_NULL_HANDLE) {
-        m_table.vkDeviceWaitIdle(m_device);
+        m_vkd.vkDeviceWaitIdle(m_device);
 
         if (m_allocator != VK_NULL_HANDLE) {
             vmaDestroyAllocator(m_allocator);
             m_allocator = VK_NULL_HANDLE;
         }
 
-        m_table.vkDestroyDevice(m_device, nullptr);
+        m_vkd.vkDestroyDevice(m_device, nullptr);
         m_device = VK_NULL_HANDLE;
     }
 

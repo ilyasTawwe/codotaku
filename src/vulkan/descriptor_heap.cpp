@@ -23,7 +23,7 @@ DescriptorHeap::DescriptorHeap(DescriptorHeap&& other) noexcept
     : m_vk(other.m_vk),
       m_device(std::exchange(other.m_device, VK_NULL_HANDLE)),
       m_allocator(std::exchange(other.m_allocator, VK_NULL_HANDLE)),
-      m_table(other.m_table),
+      m_vkd(other.m_vkd),
       m_resource_buffer(std::exchange(other.m_resource_buffer, VK_NULL_HANDLE)),
       m_resource_allocation(std::exchange(other.m_resource_allocation, VK_NULL_HANDLE)),
       m_resource_mapped(std::exchange(other.m_resource_mapped, nullptr)),
@@ -53,7 +53,7 @@ DescriptorHeap& DescriptorHeap::operator=(DescriptorHeap&& other) noexcept {
         m_vk = other.m_vk;
         m_device = std::exchange(other.m_device, VK_NULL_HANDLE);
         m_allocator = std::exchange(other.m_allocator, VK_NULL_HANDLE);
-        m_table = other.m_table;
+        m_vkd = other.m_vkd;
         m_resource_buffer = std::exchange(other.m_resource_buffer, VK_NULL_HANDLE);
         m_resource_allocation = std::exchange(other.m_resource_allocation, VK_NULL_HANDLE);
         m_resource_mapped = std::exchange(other.m_resource_mapped, nullptr);
@@ -88,7 +88,7 @@ void DescriptorHeap::init(
     m_vk = &vk;
     m_device = vk.get_device();
     m_allocator = vk.get_allocator();
-    m_table = vk.get_table();
+    m_vkd = vk.vkd();
 
     const auto& props = vk.get_descriptor_heap_properties();
     m_resource_heap_alignment = props.resourceHeapAlignment ? props.resourceHeapAlignment : 32;
@@ -208,7 +208,7 @@ uint32_t DescriptorHeap::write_sampled_image(const VkImageViewCreateInfo& view_i
         .size = m_image_descriptor_size,
     };
 
-    VkResult res = m_table.vkWriteResourceDescriptorsEXT(m_device, 1, &res_info, &host_range);
+    VkResult res = m_vkd.vkWriteResourceDescriptorsEXT(m_device, 1, &res_info, &host_range);
     if (res != VK_SUCCESS) {
         throw std::runtime_error("Failed to write Sampled Image descriptor");
     }
@@ -246,7 +246,7 @@ uint32_t DescriptorHeap::write_storage_image(const VkImageViewCreateInfo& view_i
         .size = m_image_descriptor_size,
     };
 
-    VkResult res = m_table.vkWriteResourceDescriptorsEXT(m_device, 1, &res_info, &host_range);
+    VkResult res = m_vkd.vkWriteResourceDescriptorsEXT(m_device, 1, &res_info, &host_range);
     if (res != VK_SUCCESS) {
         throw std::runtime_error("Failed to write Storage Image descriptor");
     }
@@ -270,7 +270,7 @@ uint32_t DescriptorHeap::write_sampler(const VkSamplerCreateInfo& sampler_info) 
         .size = m_sampler_descriptor_size,
     };
 
-    VkResult res = m_table.vkWriteSamplerDescriptorsEXT(m_device, 1, &sampler_info, &host_range);
+    VkResult res = m_vkd.vkWriteSamplerDescriptorsEXT(m_device, 1, &sampler_info, &host_range);
     if (res != VK_SUCCESS) {
         throw std::runtime_error("Failed to write Sampler descriptor");
     }
@@ -306,7 +306,7 @@ uint32_t DescriptorHeap::write_storage_buffer(VkDeviceAddress address, VkDeviceS
         .size = m_buffer_descriptor_size,
     };
 
-    VkResult res = m_table.vkWriteResourceDescriptorsEXT(m_device, 1, &res_info, &host_range);
+    VkResult res = m_vkd.vkWriteResourceDescriptorsEXT(m_device, 1, &res_info, &host_range);
     if (res != VK_SUCCESS) {
         throw std::runtime_error("Failed to write Storage Buffer descriptor");
     }
@@ -342,7 +342,7 @@ uint32_t DescriptorHeap::write_uniform_buffer(VkDeviceAddress address, VkDeviceS
         .size = m_buffer_descriptor_size,
     };
 
-    VkResult res = m_table.vkWriteResourceDescriptorsEXT(m_device, 1, &res_info, &host_range);
+    VkResult res = m_vkd.vkWriteResourceDescriptorsEXT(m_device, 1, &res_info, &host_range);
     if (res != VK_SUCCESS) {
         throw std::runtime_error("Failed to write Uniform Buffer descriptor");
     }
@@ -362,7 +362,7 @@ void DescriptorHeap::bind_resource_heap(VkCommandBuffer cmd) const {
         .reservedRangeOffset = 0,
         .reservedRangeSize = m_resource_reserved_size,
     };
-    m_table.vkCmdBindResourceHeapEXT(cmd, &bind_info);
+    m_vkd.vkCmdBindResourceHeapEXT(cmd, &bind_info);
 }
 
 void DescriptorHeap::bind_sampler_heap(VkCommandBuffer cmd) const {
@@ -376,7 +376,7 @@ void DescriptorHeap::bind_sampler_heap(VkCommandBuffer cmd) const {
         .reservedRangeOffset = 0,
         .reservedRangeSize = m_sampler_reserved_size,
     };
-    m_table.vkCmdBindSamplerHeapEXT(cmd, &bind_info);
+    m_vkd.vkCmdBindSamplerHeapEXT(cmd, &bind_info);
 }
 
 void DescriptorHeap::bind(VkCommandBuffer cmd) const {
@@ -384,7 +384,7 @@ void DescriptorHeap::bind(VkCommandBuffer cmd) const {
     bind_sampler_heap(cmd);
 }
 
-void DescriptorHeap::push_data(VkCommandBuffer cmd, uint32_t offset, uint32_t size, const void* data) {
+void DescriptorHeap::push_data(VkCommandBuffer cmd, uint32_t offset, uint32_t size, const void* data) const {
     VkPushDataInfoEXT push_info{
         .sType = VK_STRUCTURE_TYPE_PUSH_DATA_INFO_EXT,
         .pNext = nullptr,
@@ -394,7 +394,20 @@ void DescriptorHeap::push_data(VkCommandBuffer cmd, uint32_t offset, uint32_t si
             .size = size,
         },
     };
-    vkCmdPushDataEXT(cmd, &push_info);
+    m_vkd.vkCmdPushDataEXT(cmd, &push_info);
+}
+
+void DescriptorHeap::push_data(const VolkDeviceTable& vkd, VkCommandBuffer cmd, uint32_t offset, uint32_t size, const void* data) {
+    VkPushDataInfoEXT push_info{
+        .sType = VK_STRUCTURE_TYPE_PUSH_DATA_INFO_EXT,
+        .pNext = nullptr,
+        .offset = offset,
+        .data = {
+            .address = data,
+            .size = size,
+        },
+    };
+    vkd.vkCmdPushDataEXT(cmd, &push_info);
 }
 
 } // namespace codotaku

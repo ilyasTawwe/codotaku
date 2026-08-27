@@ -54,7 +54,9 @@ public:
     // Getters
     VkPhysicalDevice get_physical_device() const { return m_physical_device; }
     VkDevice get_device() const { return m_device; }
-    const VolkDeviceTable& get_table() const { return m_table; }
+    const VolkDeviceTable& vkd() const { return m_vkd; }
+    const VolkDeviceTable& get_vkd() const { return m_vkd; }
+    const VolkDeviceTable& get_table() const { return m_vkd; }
     VmaAllocator get_allocator() const { return m_allocator; }
 
     // Queue accessors
@@ -109,7 +111,7 @@ private:
 
     VkPhysicalDevice m_physical_device{VK_NULL_HANDLE};
     VkDevice m_device{VK_NULL_HANDLE};
-    VolkDeviceTable m_table{};
+    VolkDeviceTable m_vkd{};
     PFN_vkSetDebugUtilsObjectNameEXT m_pfnSetDebugUtilsObjectNameEXT{nullptr};
     PFN_vkCmdBeginDebugUtilsLabelEXT m_pfnCmdBeginDebugUtilsLabelEXT{nullptr};
     PFN_vkCmdEndDebugUtilsLabelEXT m_pfnCmdEndDebugUtilsLabelEXT{nullptr};

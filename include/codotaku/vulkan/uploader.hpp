@@ -124,7 +124,7 @@ private:
     VkQueue m_queue{VK_NULL_HANDLE};
     VmaAllocator m_allocator{VK_NULL_HANDLE};
     DeviceAlignmentLimits m_limits{};
-    VolkDeviceTable m_table{};
+    VolkDeviceTable m_vkd{};
 
     VkCommandPool m_command_pool{VK_NULL_HANDLE};
     VkCommandBuffer m_cmd{VK_NULL_HANDLE};

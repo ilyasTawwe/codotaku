@@ -145,14 +145,16 @@ CompiledShaders SlangCompiler::compile_source(const char* source_code, const cha
     return result;
 }
 
-VkShaderModule create_shader_module(VkDevice device, const std::vector<uint32_t>& spirv) {
+VkShaderModule create_shader_module(const VolkDeviceTable& table, VkDevice device, const std::vector<uint32_t>& spirv) {
     VkShaderModuleCreateInfo create_info{
         .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
         .codeSize = spirv.size() * sizeof(uint32_t),
         .pCode = spirv.data(),
     };
     VkShaderModule module{VK_NULL_HANDLE};
-    if (vkCreateShaderModule(device, &create_info, nullptr, &module) != VK_SUCCESS) {
+    if (table.vkCreateShaderModule(device, &create_info, nullptr, &module) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create Vulkan shader module from SPIR-V");
     }
     return module;

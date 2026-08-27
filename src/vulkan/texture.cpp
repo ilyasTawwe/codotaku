@@ -15,6 +15,7 @@ Texture::~Texture() {
 Texture::Texture(Texture&& other) noexcept
     : m_device(std::exchange(other.m_device, VK_NULL_HANDLE)),
       m_allocator(std::exchange(other.m_allocator, VK_NULL_HANDLE)),
+      m_table(other.m_table),
       m_desc(std::exchange(other.m_desc, {})),
       m_image(std::exchange(other.m_image, VK_NULL_HANDLE)),
       m_view(std::exchange(other.m_view, VK_NULL_HANDLE)),
@@ -29,6 +30,7 @@ Texture& Texture::operator=(Texture&& other) noexcept {
         cleanup();
         m_device = std::exchange(other.m_device, VK_NULL_HANDLE);
         m_allocator = std::exchange(other.m_allocator, VK_NULL_HANDLE);
+        m_table = other.m_table;
         m_desc = std::exchange(other.m_desc, {});
         m_image = std::exchange(other.m_image, VK_NULL_HANDLE);
         m_view = std::exchange(other.m_view, VK_NULL_HANDLE);
@@ -44,6 +46,7 @@ Texture& Texture::operator=(Texture&& other) noexcept {
 void Texture::init(
     VkDevice device,
     VmaAllocator allocator,
+    const VolkDeviceTable& table,
     VkImage image,
     VkImageView view,
     VmaAllocation allocation,
@@ -52,6 +55,7 @@ void Texture::init(
     cleanup();
     m_device = device;
     m_allocator = allocator;
+    m_table = table;
     m_image = image;
     m_view = view;
     m_allocation = allocation;
@@ -154,7 +158,7 @@ Texture Texture::create_uninitialized(
     vk.set_name(sampler, (final_desc.name + "_sampler").c_str());
 
     Texture tex;
-    tex.init(device, allocator, image, view, allocation, sampler, final_desc);
+    tex.init(device, allocator, vk.get_table(), image, view, allocation, sampler, final_desc);
     return tex;
 }
 
@@ -211,15 +215,15 @@ void Texture::write_to_descriptor_heap(DescriptorHeap& heap) {
 
 void Texture::cleanup() {
     if (m_device != VK_NULL_HANDLE) {
-        vkDeviceWaitIdle(m_device);
+        m_table.vkDeviceWaitIdle(m_device);
 
         if (m_sampler != VK_NULL_HANDLE) {
-            vkDestroySampler(m_device, m_sampler, nullptr);
+            m_table.vkDestroySampler(m_device, m_sampler, nullptr);
             m_sampler = VK_NULL_HANDLE;
         }
 
         if (m_view != VK_NULL_HANDLE) {
-            vkDestroyImageView(m_device, m_view, nullptr);
+            m_table.vkDestroyImageView(m_device, m_view, nullptr);
             m_view = VK_NULL_HANDLE;
         }
 

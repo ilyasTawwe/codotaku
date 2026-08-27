@@ -43,6 +43,6 @@ private:
     Slang::ComPtr<slang::IGlobalSession> m_global_session;
 };
 
-VkShaderModule create_shader_module(VkDevice device, const std::vector<uint32_t>& spirv);
+VkShaderModule create_shader_module(const VolkDeviceTable& table, VkDevice device, const std::vector<uint32_t>& spirv);
 
 } // namespace codotaku

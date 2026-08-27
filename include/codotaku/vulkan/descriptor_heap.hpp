@@ -37,12 +37,19 @@ public:
     void bind_resource_heap(VkCommandBuffer cmd) const;
     void bind_sampler_heap(VkCommandBuffer cmd) const;
 
-    // Push Data Helper
-    static void push_data(VkCommandBuffer cmd, uint32_t offset, uint32_t size, const void* data);
+    // Push Data methods (using device dispatch table)
+    void push_data(VkCommandBuffer cmd, uint32_t offset, uint32_t size, const void* data) const;
 
     template <typename T>
-    static void push_data(VkCommandBuffer cmd, const T& data, uint32_t offset = 0) {
+    void push_data(VkCommandBuffer cmd, const T& data, uint32_t offset = 0) const {
         push_data(cmd, offset, sizeof(T), &data);
+    }
+
+    static void push_data(const VolkDeviceTable& vkd, VkCommandBuffer cmd, uint32_t offset, uint32_t size, const void* data);
+
+    template <typename T>
+    static void push_data(const VolkDeviceTable& vkd, VkCommandBuffer cmd, const T& data, uint32_t offset = 0) {
+        push_data(vkd, cmd, offset, sizeof(T), &data);
     }
 
     VkDeviceAddress get_resource_heap_address() const { return m_resource_heap_address; }
@@ -54,7 +61,7 @@ private:
     VulkanDevice* m_vk{nullptr};
     VkDevice m_device{VK_NULL_HANDLE};
     VmaAllocator m_allocator{VK_NULL_HANDLE};
-    VolkDeviceTable m_table{};
+    VolkDeviceTable m_vkd{};
 
     // Resource Heap
     VkBuffer m_resource_buffer{VK_NULL_HANDLE};

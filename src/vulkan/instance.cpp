@@ -37,14 +37,14 @@ VulkanInstance::~VulkanInstance() {
 
 VulkanInstance::VulkanInstance(VulkanInstance&& other) noexcept
     : m_instance(std::exchange(other.m_instance, VK_NULL_HANDLE)),
-      m_table(other.m_table),
+      m_vki(other.m_vki),
       m_debug_messenger(std::exchange(other.m_debug_messenger, VK_NULL_HANDLE)) {}
 
 VulkanInstance& VulkanInstance::operator=(VulkanInstance&& other) noexcept {
     if (this != &other) {
         cleanup();
         m_instance = std::exchange(other.m_instance, VK_NULL_HANDLE);
-        m_table = other.m_table;
+        m_vki = other.m_vki;
         m_debug_messenger = std::exchange(other.m_debug_messenger, VK_NULL_HANDLE);
     }
     return *this;
@@ -153,33 +153,33 @@ void VulkanInstance::init_instance(const std::string& app_name, bool enable_vali
         throw std::runtime_error("Failed to create Vulkan instance");
     }
 
-    // Load instance-level dispatch table
-    volkLoadInstanceTable(&m_table, m_instance);
-    volkLoadInstance(m_instance);
+    // Load instance-level dispatch table and load instance functions only (no device trampolines)
+    volkLoadInstanceTable(&m_vki, m_instance);
+    volkLoadInstanceOnly(m_instance);
 
-    if (debug_utils_found && m_table.vkCreateDebugUtilsMessengerEXT) {
-        m_table.vkCreateDebugUtilsMessengerEXT(m_instance, &debug_create_info, nullptr, &m_debug_messenger);
+    if (debug_utils_found && m_vki.vkCreateDebugUtilsMessengerEXT) {
+        m_vki.vkCreateDebugUtilsMessengerEXT(m_instance, &debug_create_info, nullptr, &m_debug_messenger);
     }
 }
 
 std::vector<VkPhysicalDevice> VulkanInstance::enumerate_physical_devices() const {
     uint32_t count = 0;
-    m_table.vkEnumeratePhysicalDevices(m_instance, &count, nullptr);
+    m_vki.vkEnumeratePhysicalDevices(m_instance, &count, nullptr);
     if (count == 0) {
         return {};
     }
     std::vector<VkPhysicalDevice> devices(count);
-    m_table.vkEnumeratePhysicalDevices(m_instance, &count, devices.data());
+    m_vki.vkEnumeratePhysicalDevices(m_instance, &count, devices.data());
     return devices;
 }
 
 void VulkanInstance::cleanup() {
     if (m_instance != VK_NULL_HANDLE) {
-        if (m_debug_messenger != VK_NULL_HANDLE && m_table.vkDestroyDebugUtilsMessengerEXT) {
-            m_table.vkDestroyDebugUtilsMessengerEXT(m_instance, m_debug_messenger, nullptr);
+        if (m_debug_messenger != VK_NULL_HANDLE && m_vki.vkDestroyDebugUtilsMessengerEXT) {
+            m_vki.vkDestroyDebugUtilsMessengerEXT(m_instance, m_debug_messenger, nullptr);
             m_debug_messenger = VK_NULL_HANDLE;
         }
-        m_table.vkDestroyInstance(m_instance, nullptr);
+        m_vki.vkDestroyInstance(m_instance, nullptr);
         m_instance = VK_NULL_HANDLE;
     }
 }

@@ -25,7 +25,7 @@ Uploader::Uploader(VulkanDevice& vk)
       m_queue(vk.get_transfer_queue().handle),
       m_allocator(vk.get_allocator()),
       m_limits(vk.get_alignment_limits()),
-      m_table(vk.get_table()) {
+      m_vkd(vk.vkd()) {
     VkCommandPoolCreateInfo pool_info{
         .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
         .pNext = nullptr,
@@ -33,7 +33,7 @@ Uploader::Uploader(VulkanDevice& vk)
         .queueFamilyIndex = vk.get_transfer_queue().family_index,
     };
 
-    if (m_table.vkCreateCommandPool(m_device, &pool_info, nullptr, &m_command_pool) != VK_SUCCESS) {
+    if (m_vkd.vkCreateCommandPool(m_device, &pool_info, nullptr, &m_command_pool) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create Uploader command pool");
     }
 
@@ -45,7 +45,7 @@ Uploader::Uploader(VulkanDevice& vk)
         .commandBufferCount = 1,
     };
 
-    if (m_table.vkAllocateCommandBuffers(m_device, &alloc_info, &m_cmd) != VK_SUCCESS) {
+    if (m_vkd.vkAllocateCommandBuffers(m_device, &alloc_info, &m_cmd) != VK_SUCCESS) {
         throw std::runtime_error("Failed to allocate Uploader command buffer");
     }
 
@@ -55,7 +55,7 @@ Uploader::Uploader(VulkanDevice& vk)
         .flags = VK_FENCE_CREATE_SIGNALED_BIT,
     };
 
-    if (m_table.vkCreateFence(m_device, &fence_info, nullptr, &m_fence) != VK_SUCCESS) {
+    if (m_vkd.vkCreateFence(m_device, &fence_info, nullptr, &m_fence) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create Uploader fence");
     }
 
@@ -69,11 +69,11 @@ Uploader::~Uploader() {
 
     if (m_device != VK_NULL_HANDLE) {
         if (m_fence != VK_NULL_HANDLE) {
-            m_table.vkDestroyFence(m_device, m_fence, nullptr);
+            m_vkd.vkDestroyFence(m_device, m_fence, nullptr);
             m_fence = VK_NULL_HANDLE;
         }
         if (m_command_pool != VK_NULL_HANDLE) {
-            m_table.vkDestroyCommandPool(m_device, m_command_pool, nullptr);
+            m_vkd.vkDestroyCommandPool(m_device, m_command_pool, nullptr);
             m_command_pool = VK_NULL_HANDLE;
         }
     }
@@ -85,7 +85,7 @@ Uploader::Uploader(Uploader&& other) noexcept
       m_queue(std::exchange(other.m_queue, VK_NULL_HANDLE)),
       m_allocator(std::exchange(other.m_allocator, VK_NULL_HANDLE)),
       m_limits(other.m_limits),
-      m_table(other.m_table),
+      m_vkd(other.m_vkd),
       m_command_pool(std::exchange(other.m_command_pool, VK_NULL_HANDLE)),
       m_cmd(std::exchange(other.m_cmd, VK_NULL_HANDLE)),
       m_fence(std::exchange(other.m_fence, VK_NULL_HANDLE)),
@@ -107,7 +107,7 @@ Uploader& Uploader::operator=(Uploader&& other) noexcept {
         m_queue = std::exchange(other.m_queue, VK_NULL_HANDLE);
         m_allocator = std::exchange(other.m_allocator, VK_NULL_HANDLE);
         m_limits = other.m_limits;
-        m_table = other.m_table;
+        m_vkd = other.m_vkd;
         m_command_pool = std::exchange(other.m_command_pool, VK_NULL_HANDLE);
         m_cmd = std::exchange(other.m_cmd, VK_NULL_HANDLE);
         m_fence = std::exchange(other.m_fence, VK_NULL_HANDLE);
@@ -167,7 +167,7 @@ BufferAllocation Uploader::upload_buffer(
         .pNext = nullptr,
         .buffer = result.buffer,
     };
-    result.device_address = m_table.vkGetBufferDeviceAddress(m_device, &bda_info);
+    result.device_address = m_vkd.vkGetBufferDeviceAddress(m_device, &bda_info);
 
     if (debug_name && m_vk) {
         m_vk->set_name(result.buffer, debug_name);
@@ -293,7 +293,7 @@ void Uploader::upload() {
 
     vmaFlushAllocation(m_allocator, m_staging_allocation, 0, required_staging_size);
 
-    m_table.vkResetFences(m_device, 1, &m_fence);
+    m_vkd.vkResetFences(m_device, 1, &m_fence);
 
     VkCommandBufferBeginInfo begin_info{
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -301,7 +301,7 @@ void Uploader::upload() {
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
         .pInheritanceInfo = nullptr,
     };
-    m_table.vkBeginCommandBuffer(m_cmd, &begin_info);
+    m_vkd.vkBeginCommandBuffer(m_cmd, &begin_info);
 
     if (m_vk) m_vk->begin_debug_label(m_cmd, "Batch GPU Upload", {0.2f, 0.8f, 0.3f, 1.0f});
 
@@ -312,7 +312,7 @@ void Uploader::upload() {
             .dstOffset = task.dst_offset,
             .size = task.size,
         };
-        m_table.vkCmdCopyBuffer(m_cmd, m_staging_buffer, task.dst_buffer, 1, &copy_region);
+        m_vkd.vkCmdCopyBuffer(m_cmd, m_staging_buffer, task.dst_buffer, 1, &copy_region);
     }
 
     // 2. Record Image Transfers
@@ -351,7 +351,7 @@ void Uploader::upload() {
             .imageMemoryBarrierCount = 1,
             .pImageMemoryBarriers = &pre_copy_barrier,
         };
-        m_table.vkCmdPipelineBarrier2(m_cmd, &pre_dep);
+        m_vkd.vkCmdPipelineBarrier2(m_cmd, &pre_dep);
 
         VkBufferImageCopy copy_region{
             .bufferOffset = task.staging_offset,
@@ -367,7 +367,7 @@ void Uploader::upload() {
             .imageExtent = task.extent,
         };
 
-        m_table.vkCmdCopyBufferToImage(m_cmd, m_staging_buffer, task.dst_image, VK_IMAGE_LAYOUT_GENERAL, 1, &copy_region);
+        m_vkd.vkCmdCopyBufferToImage(m_cmd, m_staging_buffer, task.dst_image, VK_IMAGE_LAYOUT_GENERAL, 1, &copy_region);
 
         VkImageMemoryBarrier2 post_copy_barrier{
             .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
@@ -395,12 +395,12 @@ void Uploader::upload() {
             .imageMemoryBarrierCount = 1,
             .pImageMemoryBarriers = &post_copy_barrier,
         };
-        m_table.vkCmdPipelineBarrier2(m_cmd, &post_dep);
+        m_vkd.vkCmdPipelineBarrier2(m_cmd, &post_dep);
     }
 
     if (m_vk) m_vk->end_debug_label(m_cmd);
 
-    m_table.vkEndCommandBuffer(m_cmd);
+    m_vkd.vkEndCommandBuffer(m_cmd);
 
     VkSubmitInfo submit_info{
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
@@ -414,7 +414,7 @@ void Uploader::upload() {
         .pSignalSemaphores = nullptr,
     };
 
-    if (m_table.vkQueueSubmit(m_queue, 1, &submit_info, m_fence) != VK_SUCCESS) {
+    if (m_vkd.vkQueueSubmit(m_queue, 1, &submit_info, m_fence) != VK_SUCCESS) {
         throw std::runtime_error("Failed to submit batch upload commands to queue");
     }
 
@@ -428,7 +428,7 @@ void Uploader::upload() {
 
 void Uploader::wait(uint64_t timeout_ns) {
     if (m_in_flight && m_fence != VK_NULL_HANDLE) {
-        m_table.vkWaitForFences(m_device, 1, &m_fence, VK_TRUE, timeout_ns);
+        m_vkd.vkWaitForFences(m_device, 1, &m_fence, VK_TRUE, timeout_ns);
         m_in_flight = false;
     }
 }
@@ -437,7 +437,7 @@ bool Uploader::is_ready() const {
     if (!m_in_flight) {
         return true;
     }
-    return (m_table.vkGetFenceStatus(m_device, m_fence) == VK_SUCCESS);
+    return (m_vkd.vkGetFenceStatus(m_device, m_fence) == VK_SUCCESS);
 }
 
 } // namespace codotaku

@@ -94,7 +94,7 @@ void FrameContext::begin_rendering(VkClearColorValue clear_color, VkImageView de
         .pStencilAttachment = nullptr,
     };
 
-    vkCmdBeginRendering(cmd, &rendering_info);
+    vkd.vkCmdBeginRendering(cmd, &rendering_info);
 }
 
 void FrameContext::begin_rendering_with_attachment(VkClearColorValue clear_color, uint32_t depth_attachment_id, float clear_depth) const {
@@ -105,7 +105,7 @@ void FrameContext::begin_rendering_with_attachment(VkClearColorValue clear_color
 }
 
 void FrameContext::end_rendering() const {
-    vkCmdEndRendering(cmd);
+    vkd.vkCmdEndRendering(cmd);
 }
 
 void FrameContext::set_viewport_and_scissor() const {
@@ -122,8 +122,8 @@ void FrameContext::set_viewport_and_scissor() const {
         .extent = {width, height},
     };
 
-    vkCmdSetViewport(cmd, 0, 1, &viewport);
-    vkCmdSetScissor(cmd, 0, 1, &scissor);
+    vkd.vkCmdSetViewport(cmd, 0, 1, &viewport);
+    vkd.vkCmdSetScissor(cmd, 0, 1, &scissor);
 }
 
 Window::Window(WaylandContext& wl, VulkanDevice& vk, WindowConfig config)
@@ -262,7 +262,7 @@ void Window::create_dmabuf_buffers(WaylandContext& wl, VulkanDevice& vk) {
             .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
         };
 
-        if (vk.get_table().vkCreateImage(vk.get_device(), &image_info, nullptr, &buf.image) != VK_SUCCESS) {
+        if (vk.vkd().vkCreateImage(vk.get_device(), &image_info, nullptr, &buf.image) != VK_SUCCESS) {
             throw std::runtime_error("Failed to create DRM format modifier image for window: " + m_config.title);
         }
 
@@ -270,7 +270,7 @@ void Window::create_dmabuf_buffers(WaylandContext& wl, VulkanDevice& vk) {
         vk.set_name(buf.image, img_name.c_str());
 
         VkMemoryRequirements mem_reqs;
-        vk.get_table().vkGetImageMemoryRequirements(vk.get_device(), buf.image, &mem_reqs);
+        vk.vkd().vkGetImageMemoryRequirements(vk.get_device(), buf.image, &mem_reqs);
 
         uint32_t mem_type_index = vk.find_memory_type(
             mem_reqs.memoryTypeBits,
@@ -296,11 +296,11 @@ void Window::create_dmabuf_buffers(WaylandContext& wl, VulkanDevice& vk) {
             .memoryTypeIndex = mem_type_index,
         };
 
-        if (vk.get_table().vkAllocateMemory(vk.get_device(), &alloc_info, nullptr, &buf.memory) != VK_SUCCESS) {
+        if (vk.vkd().vkAllocateMemory(vk.get_device(), &alloc_info, nullptr, &buf.memory) != VK_SUCCESS) {
             throw std::runtime_error("Failed to allocate external DMA-BUF memory");
         }
 
-        if (vk.get_table().vkBindImageMemory(vk.get_device(), buf.image, buf.memory, 0) != VK_SUCCESS) {
+        if (vk.vkd().vkBindImageMemory(vk.get_device(), buf.image, buf.memory, 0) != VK_SUCCESS) {
             throw std::runtime_error("Failed to bind image memory");
         }
 
@@ -311,7 +311,7 @@ void Window::create_dmabuf_buffers(WaylandContext& wl, VulkanDevice& vk) {
             .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
         };
 
-        if (vk.get_table().vkGetMemoryFdKHR(vk.get_device(), &get_fd_info, &buf.dmabuf_fd) != VK_SUCCESS || buf.dmabuf_fd < 0) {
+        if (vk.vkd().vkGetMemoryFdKHR(vk.get_device(), &get_fd_info, &buf.dmabuf_fd) != VK_SUCCESS || buf.dmabuf_fd < 0) {
             throw std::runtime_error("Failed to export DMA-BUF fd from Vulkan memory");
         }
 
@@ -320,7 +320,7 @@ void Window::create_dmabuf_buffers(WaylandContext& wl, VulkanDevice& vk) {
             .pNext = nullptr,
             .drmFormatModifier = 0,
         };
-        if (vk.get_table().vkGetImageDrmFormatModifierPropertiesEXT(vk.get_device(), buf.image, &mod_props) != VK_SUCCESS) {
+        if (vk.vkd().vkGetImageDrmFormatModifierPropertiesEXT(vk.get_device(), buf.image, &mod_props) != VK_SUCCESS) {
             throw std::runtime_error("Failed to query image DRM format modifier properties");
         }
 
@@ -330,7 +330,7 @@ void Window::create_dmabuf_buffers(WaylandContext& wl, VulkanDevice& vk) {
             .arrayLayer = 0,
         };
         VkSubresourceLayout layout{};
-        vk.get_table().vkGetImageSubresourceLayout(vk.get_device(), buf.image, &subresource, &layout);
+        vk.vkd().vkGetImageSubresourceLayout(vk.get_device(), buf.image, &subresource, &layout);
 
         zwp_linux_buffer_params_v1* params = zwp_linux_dmabuf_v1_create_params(wl.get_dmabuf());
         zwp_linux_buffer_params_v1_add(
@@ -376,7 +376,7 @@ void Window::create_dmabuf_buffers(WaylandContext& wl, VulkanDevice& vk) {
             },
         };
 
-        if (vk.get_table().vkCreateImageView(vk.get_device(), &view_info, nullptr, &buf.view) != VK_SUCCESS) {
+        if (vk.vkd().vkCreateImageView(vk.get_device(), &view_info, nullptr, &buf.view) != VK_SUCCESS) {
             throw std::runtime_error("Failed to create image view for DMA-BUF buffer");
         }
 
@@ -422,7 +422,7 @@ void Window::create_dmabuf_buffers(WaylandContext& wl, VulkanDevice& vk) {
             .imageMemoryBarrierCount = static_cast<uint32_t>(init_barriers.size()),
             .pImageMemoryBarriers = init_barriers.data(),
         };
-        vk.get_table().vkCmdPipelineBarrier2(cmd, &dep_info);
+        vk.vkd().vkCmdPipelineBarrier2(cmd, &dep_info);
     });
 }
 
@@ -632,11 +632,11 @@ std::optional<FrameContext> Window::begin_frame(VulkanDevice& vk) {
         timeline_wait_point(vk.get_drm_fd(), m_release_timeline, buf.last_release_point);
     }
 
-    vk.get_table().vkWaitForFences(vk.get_device(), 1, &m_in_flight_fences[m_current_buffer_idx], VK_TRUE, UINT64_MAX);
-    vk.get_table().vkResetFences(vk.get_device(), 1, &m_in_flight_fences[m_current_buffer_idx]);
+    vk.vkd().vkWaitForFences(vk.get_device(), 1, &m_in_flight_fences[m_current_buffer_idx], VK_TRUE, UINT64_MAX);
+    vk.vkd().vkResetFences(vk.get_device(), 1, &m_in_flight_fences[m_current_buffer_idx]);
 
     auto cmd = m_command_buffers[m_current_buffer_idx];
-    vk.get_table().vkResetCommandBuffer(cmd, 0);
+    vk.vkd().vkResetCommandBuffer(cmd, 0);
 
     VkCommandBufferBeginInfo begin_info{
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -644,7 +644,7 @@ std::optional<FrameContext> Window::begin_frame(VulkanDevice& vk) {
         .flags = 0,
         .pInheritanceInfo = nullptr,
     };
-    vk.get_table().vkBeginCommandBuffer(cmd, &begin_info);
+    vk.vkd().vkBeginCommandBuffer(cmd, &begin_info);
 
     float aspect = (m_height > 0) ? (static_cast<float>(m_width) / static_cast<float>(m_height)) : 1.0f;
 
@@ -657,6 +657,7 @@ std::optional<FrameContext> Window::begin_frame(VulkanDevice& vk) {
         .buffer_index = m_current_buffer_idx,
         .frame_arena = m_frame_arena,
         .gbuffer = m_gbuffer,
+        .vkd = vk.vkd(),
     };
 }
 
@@ -677,7 +678,7 @@ void Window::submit_and_present(VulkanDevice& vk, const FrameContext& frame) {
         .pSignalSemaphores = &m_render_complete_semaphores[m_current_buffer_idx],
     };
 
-    if (vk.get_table().vkQueueSubmit(vk.get_graphics_queue().handle, 1, &submit_info, m_in_flight_fences[m_current_buffer_idx]) != VK_SUCCESS) {
+    if (vk.vkd().vkQueueSubmit(vk.get_graphics_queue().handle, 1, &submit_info, m_in_flight_fences[m_current_buffer_idx]) != VK_SUCCESS) {
         throw std::runtime_error("Failed to submit draw command buffer");
     }
 
@@ -690,7 +691,7 @@ void Window::submit_and_present(VulkanDevice& vk, const FrameContext& frame) {
     };
 
     int sync_file_fd = -1;
-    if (vk.get_table().vkGetSemaphoreFdKHR(vk.get_device(), &get_sem_fd_info, &sync_file_fd) != VK_SUCCESS || sync_file_fd < 0) {
+    if (vk.vkd().vkGetSemaphoreFdKHR(vk.get_device(), &get_sem_fd_info, &sync_file_fd) != VK_SUCCESS || sync_file_fd < 0) {
         throw std::runtime_error("Failed to export sync file fd from semaphore");
     }
 

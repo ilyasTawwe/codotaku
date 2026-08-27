@@ -64,7 +64,7 @@ public:
 
 private:
     VkDevice m_device{VK_NULL_HANDLE};
-    VolkDeviceTable m_table{};
+    VolkDeviceTable m_vkd{};
     VkPipeline m_pipeline{VK_NULL_HANDLE};
 };
 

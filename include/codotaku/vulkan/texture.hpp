@@ -35,6 +35,7 @@ public:
     void init(
         VkDevice device,
         VmaAllocator allocator,
+        const VolkDeviceTable& table,
         VkImage image,
         VkImageView view,
         VmaAllocation allocation,
@@ -66,6 +67,7 @@ public:
 private:
     VkDevice m_device{VK_NULL_HANDLE};
     VmaAllocator m_allocator{VK_NULL_HANDLE};
+    VolkDeviceTable m_table{};
     TextureDesc m_desc{};
 
     VkImage m_image{VK_NULL_HANDLE};
