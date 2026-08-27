@@ -65,6 +65,8 @@ struct VertexInput {
 struct PushConstants {
     float time;
     float scale;
+    float aspect_ratio;
+    float _pad;
 };
 [[vk::push_constant]] PushConstants pc;
 
@@ -83,7 +85,10 @@ VertexOutput vsMain(VertexInput input) {
         input.position.x * sin_t + input.position.y * cos_t
     ) * pc.scale;
 
-    output.position = float4(rotated, 0.0, 1.0);
+    // Aspect ratio correction so triangle never stretches or squashes on resize
+    float2 aspect_corrected = float2(rotated.x / pc.aspect_ratio, rotated.y);
+
+    output.position = float4(aspect_corrected, 0.0, 1.0);
     output.color = input.color;
     return output;
 }
@@ -298,6 +303,7 @@ void init_wayland(WaylandState& wl) {
     xdg_toplevel_add_listener(wl.xdg_toplevel, &toplevel_listener, &wl);
     xdg_toplevel_set_title(wl.xdg_toplevel, "Vulkan Dynamic Rendering Slang Triangle (C++26)");
     xdg_toplevel_set_app_id(wl.xdg_toplevel, "codotaku.vulkan.triangle");
+    xdg_toplevel_set_min_size(wl.xdg_toplevel, 100, 100);
 
     // Request Server-Side Decoration if available
     if (wl.decoration_mgr && wl.xdg_toplevel) {
@@ -755,6 +761,7 @@ void recreate_buffers(WaylandState& wl, VulkanState& vk) {
     vkDeviceWaitIdle(vk.device);
     cleanup_dmabuf_buffers(vk);
     create_dmabuf_buffers(wl, vk);
+    vk.current_buffer_idx = 0;
 }
 
 void create_vertex_buffer(VulkanState& vk) {
@@ -1267,9 +1274,13 @@ void render_frame(WaylandState& wl, VulkanState& vk, std::chrono::steady_clock::
     struct ShaderPushConstants {
         float time;
         float scale;
+        float aspect_ratio;
+        float _pad;
     } pc = {
         .time = time_sec,
         .scale = 0.8f + 0.15f * std::sin(time_sec * 2.0f),
+        .aspect_ratio = (wl.height > 0) ? (static_cast<float>(wl.width) / static_cast<float>(wl.height)) : 1.0f,
+        ._pad = 0.0f,
     };
 
     vkCmdPushConstants(
