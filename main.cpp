@@ -7,9 +7,11 @@
 #include <cstring>
 #include <fcntl.h>
 #include <iostream>
+#include <memory>
 #include <poll.h>
 #include <print>
 #include <stdexcept>
+#include <string>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -19,6 +21,7 @@
 #include <xf86drm.h>
 
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 
 #include <slang.h>
 #include <slang-com-ptr.h>
@@ -35,9 +38,8 @@
 
 namespace {
 
-constexpr uint32_t DEFAULT_WIDTH = 800;
-constexpr uint32_t DEFAULT_HEIGHT = 600;
 constexpr size_t BUFFER_POOL_SIZE = 3;
+constexpr VkFormat DEPTH_FORMAT = VK_FORMAT_D32_SFLOAT;
 
 std::atomic<bool> g_interrupted{false};
 
@@ -46,26 +48,70 @@ void signal_handler(int) {
 }
 
 struct Vertex {
-    glm::vec2 pos;
+    glm::vec3 pos;
     glm::vec3 color;
+    glm::vec3 normal;
 };
 
-const std::vector<Vertex> TRIANGLE_VERTICES = {
-    { {  0.0f, -0.6f }, { 1.0f, 0.0f, 0.0f } }, // Top (Red)
-    { {  0.6f,  0.6f }, { 0.0f, 1.0f, 0.0f } }, // Bottom Right (Green)
-    { { -0.6f,  0.6f }, { 0.0f, 0.0f, 1.0f } }, // Bottom Left (Blue)
+// 24 vertices for 6 faces with crisp per-face normals
+const std::vector<Vertex> CUBE_VERTICES = {
+    // Front face (Z = +0.5) - Red
+    { {-0.5f, -0.5f,  0.5f}, {1.0f, 0.25f, 0.25f}, { 0.0f,  0.0f,  1.0f} },
+    { { 0.5f, -0.5f,  0.5f}, {1.0f, 0.25f, 0.25f}, { 0.0f,  0.0f,  1.0f} },
+    { { 0.5f,  0.5f,  0.5f}, {1.0f, 0.25f, 0.25f}, { 0.0f,  0.0f,  1.0f} },
+    { {-0.5f,  0.5f,  0.5f}, {1.0f, 0.25f, 0.25f}, { 0.0f,  0.0f,  1.0f} },
+
+    // Back face (Z = -0.5) - Cyan
+    { { 0.5f, -0.5f, -0.5f}, {0.25f, 1.0f, 1.0f}, { 0.0f,  0.0f, -1.0f} },
+    { {-0.5f, -0.5f, -0.5f}, {0.25f, 1.0f, 1.0f}, { 0.0f,  0.0f, -1.0f} },
+    { {-0.5f,  0.5f, -0.5f}, {0.25f, 1.0f, 1.0f}, { 0.0f,  0.0f, -1.0f} },
+    { { 0.5f,  0.5f, -0.5f}, {0.25f, 1.0f, 1.0f}, { 0.0f,  0.0f, -1.0f} },
+
+    // Top face (Y = -0.5) - Green
+    { {-0.5f, -0.5f, -0.5f}, {0.25f, 1.0f, 0.25f}, { 0.0f, -1.0f,  0.0f} },
+    { { 0.5f, -0.5f, -0.5f}, {0.25f, 1.0f, 0.25f}, { 0.0f, -1.0f,  0.0f} },
+    { { 0.5f, -0.5f,  0.5f}, {0.25f, 1.0f, 0.25f}, { 0.0f, -1.0f,  0.0f} },
+    { {-0.5f, -0.5f,  0.5f}, {0.25f, 1.0f, 0.25f}, { 0.0f, -1.0f,  0.0f} },
+
+    // Bottom face (Y = +0.5) - Magenta
+    { {-0.5f,  0.5f,  0.5f}, {1.0f, 0.25f, 1.0f}, { 0.0f,  1.0f,  0.0f} },
+    { { 0.5f,  0.5f,  0.5f}, {1.0f, 0.25f, 1.0f}, { 0.0f,  1.0f,  0.0f} },
+    { { 0.5f,  0.5f, -0.5f}, {1.0f, 0.25f, 1.0f}, { 0.0f,  1.0f,  0.0f} },
+    { {-0.5f,  0.5f, -0.5f}, {1.0f, 0.25f, 1.0f}, { 0.0f,  1.0f,  0.0f} },
+
+    // Right face (X = +0.5) - Blue
+    { { 0.5f, -0.5f,  0.5f}, {0.25f, 0.5f, 1.0f}, { 1.0f,  0.0f,  0.0f} },
+    { { 0.5f, -0.5f, -0.5f}, {0.25f, 0.5f, 1.0f}, { 1.0f,  0.0f,  0.0f} },
+    { { 0.5f,  0.5f, -0.5f}, {0.25f, 0.5f, 1.0f}, { 1.0f,  0.0f,  0.0f} },
+    { { 0.5f,  0.5f,  0.5f}, {0.25f, 0.5f, 1.0f}, { 1.0f,  0.0f,  0.0f} },
+
+    // Left face (X = -0.5) - Yellow
+    { {-0.5f, -0.5f, -0.5f}, {1.0f, 1.0f, 0.25f}, {-1.0f,  0.0f,  0.0f} },
+    { {-0.5f, -0.5f,  0.5f}, {1.0f, 1.0f, 0.25f}, {-1.0f,  0.0f,  0.0f} },
+    { {-0.5f,  0.5f,  0.5f}, {1.0f, 1.0f, 0.25f}, {-1.0f,  0.0f,  0.0f} },
+    { {-0.5f,  0.5f, -0.5f}, {1.0f, 1.0f, 0.25f}, {-1.0f,  0.0f,  0.0f} },
 };
 
-const char* TRIANGLE_SLANG_CODE = R"(
+const std::vector<uint16_t> CUBE_INDICES = {
+     0,  1,  2,   2,  3,  0, // Front
+     4,  5,  6,   6,  7,  4, // Back
+     8,  9, 10,  10, 11,  8, // Top
+    12, 13, 14,  14, 15, 12, // Bottom
+    16, 17, 18,  18, 19, 16, // Right
+    20, 21, 22,  22, 23, 20  // Left
+};
+
+const char* CUBE_SLANG_CODE = R"(
 struct VertexInput {
-    float2 position : POSITION;
+    float3 position : POSITION;
     float3 color : COLOR;
+    float3 normal : NORMAL;
 };
 
 struct PushConstants {
-    float time;
-    float scale;
-    float aspect_ratio;
+    float4x4 mvp;
+    float4x4 model;
+    float3 tint;
     float _pad;
 };
 [[vk::push_constant]] PushConstants pc;
@@ -73,33 +119,29 @@ struct PushConstants {
 struct VertexOutput {
     float4 position : SV_Position;
     float3 color : COLOR;
+    float3 normal : NORMAL;
 };
 
 [shader("vertex")]
 VertexOutput vsMain(VertexInput input) {
     VertexOutput output;
-    float cos_t = cos(pc.time);
-    float sin_t = sin(pc.time);
-    float2 rotated = float2(
-        input.position.x * cos_t - input.position.y * sin_t,
-        input.position.x * sin_t + input.position.y * cos_t
-    ) * pc.scale;
-
-    // Aspect ratio correction so triangle never stretches or squashes on resize
-    float2 aspect_corrected = float2(rotated.x / pc.aspect_ratio, rotated.y);
-
-    output.position = float4(aspect_corrected, 0.0, 1.0);
-    output.color = input.color;
+    output.position = mul(pc.mvp, float4(input.position, 1.0));
+    output.color = input.color * pc.tint;
+    output.normal = normalize(mul((float3x3)pc.model, input.normal));
     return output;
 }
 
 [shader("fragment")]
 float4 fsMain(VertexOutput input) : SV_Target {
-    return float4(input.color, 1.0);
+    float3 lightDir = normalize(float3(0.5, 0.8, 0.7));
+    float diff = max(dot(input.normal, lightDir), 0.0);
+    float3 ambient = 0.3 * input.color;
+    float3 diffuse = diff * input.color;
+    return float4(ambient + diffuse, 1.0);
 }
 )";
 
-struct WaylandState {
+struct WaylandContext {
     wl_display* display{nullptr};
     wl_registry* registry{nullptr};
     wl_compositor* compositor{nullptr};
@@ -108,19 +150,7 @@ struct WaylandState {
     wp_linux_drm_syncobj_manager_v1* syncobj_mgr{nullptr};
     zxdg_decoration_manager_v1* decoration_mgr{nullptr};
 
-    wl_surface* surface{nullptr};
-    xdg_surface* xdg_surface{nullptr};
-    xdg_toplevel* xdg_toplevel{nullptr};
-    zxdg_toplevel_decoration_v1* toplevel_decoration{nullptr};
-    wp_linux_drm_syncobj_surface_v1* syncobj_surface{nullptr};
-
     std::vector<uint64_t> supported_modifiers;
-
-    uint32_t width{DEFAULT_WIDTH};
-    uint32_t height{DEFAULT_HEIGHT};
-    bool configured{false};
-    bool running{true};
-    bool need_resize{false};
 };
 
 struct DrmTimeline {
@@ -138,12 +168,18 @@ struct DmaBufBuffer {
     uint64_t last_release_point{0};
 };
 
-struct VertexBufferResource {
+struct DepthBuffer {
+    VkImage image{VK_NULL_HANDLE};
+    VkImageView view{VK_NULL_HANDLE};
+    VmaAllocation allocation{VK_NULL_HANDLE};
+};
+
+struct BufferResource {
     VkBuffer buffer{VK_NULL_HANDLE};
     VmaAllocation allocation{VK_NULL_HANDLE};
 };
 
-struct VulkanState {
+struct VulkanContext {
     VkInstance instance{VK_NULL_HANDLE};
     VkDebugUtilsMessengerEXT debug_messenger{VK_NULL_HANDLE};
     VkPhysicalDevice physical_device{VK_NULL_HANDLE};
@@ -153,22 +189,490 @@ struct VulkanState {
     VkPhysicalDeviceMemoryProperties memory_properties{};
 
     VmaAllocator allocator{VK_NULL_HANDLE};
-
     int drm_fd{-1};
-    DrmTimeline acquire_timeline{};
-    DrmTimeline release_timeline{};
 
-    std::vector<DmaBufBuffer> buffers;
-    size_t current_buffer_idx{0};
-
-    VertexBufferResource vertex_buffer{};
+    BufferResource vertex_buffer{};
+    BufferResource index_buffer{};
     VkPipelineLayout pipeline_layout{VK_NULL_HANDLE};
     VkPipeline pipeline{VK_NULL_HANDLE};
+};
 
-    VkCommandPool command_pool{VK_NULL_HANDLE};
-    std::vector<VkCommandBuffer> command_buffers;
-    std::vector<VkFence> in_flight_fences;
-    std::vector<VkSemaphore> render_complete_semaphores;
+uint32_t find_memory_type(const VkPhysicalDeviceMemoryProperties& mem_props, uint32_t type_filter, VkMemoryPropertyFlags properties) {
+    for (uint32_t i = 0; i < mem_props.memoryTypeCount; ++i) {
+        if ((type_filter & (1 << i)) && (mem_props.memoryTypes[i].propertyFlags & properties) == properties) {
+            return i;
+        }
+    }
+    for (uint32_t i = 0; i < mem_props.memoryTypeCount; ++i) {
+        if (type_filter & (1 << i)) {
+            return i;
+        }
+    }
+    throw std::runtime_error("Failed to find suitable memory type");
+}
+
+void timeline_attach_sync_fd(int drm_fd, DrmTimeline& timeline, int sync_fd) {
+    uint32_t temp_obj = 0;
+    if (drmSyncobjCreate(drm_fd, 0, &temp_obj) != 0) {
+        close(sync_fd);
+        throw std::runtime_error("Failed to create temporary syncobj");
+    }
+
+    if (drmSyncobjImportSyncFile(drm_fd, temp_obj, sync_fd) != 0) {
+        drmSyncobjDestroy(drm_fd, temp_obj);
+        close(sync_fd);
+        throw std::runtime_error("Failed to import sync file into DRM syncobj");
+    }
+
+    if (drmSyncobjTransfer(drm_fd, timeline.handle, timeline.point + 1, temp_obj, 0, 0) != 0) {
+        drmSyncobjDestroy(drm_fd, temp_obj);
+        close(sync_fd);
+        throw std::runtime_error("Failed to transfer DRM syncobj to timeline point");
+    }
+
+    timeline.point++;
+    drmSyncobjDestroy(drm_fd, temp_obj);
+    close(sync_fd);
+}
+
+class AppWindow {
+public:
+    AppWindow(WaylandContext& wl, VulkanContext& vk, std::string title, uint32_t width, uint32_t height, float rotation_speed, glm::vec3 tint)
+        : m_title(std::move(title)), m_width(width), m_height(height), m_rotation_speed(rotation_speed), m_tint(tint) {
+        init_wayland_surface(wl);
+        init_drm_syncobj_timelines(wl, vk);
+        create_dmabuf_buffers(wl, vk);
+        create_depth_buffer(vk);
+        create_command_resources(vk);
+    }
+
+    ~AppWindow() = default;
+
+    void cleanup(VulkanContext& vk) {
+        if (vk.device != VK_NULL_HANDLE) {
+            vkDeviceWaitIdle(vk.device);
+
+            for (auto fence : m_in_flight_fences) {
+                if (fence != VK_NULL_HANDLE) vkDestroyFence(vk.device, fence, nullptr);
+            }
+            m_in_flight_fences.clear();
+
+            for (auto sem : m_render_complete_semaphores) {
+                if (sem != VK_NULL_HANDLE) vkDestroySemaphore(vk.device, sem, nullptr);
+            }
+            m_render_complete_semaphores.clear();
+
+            if (m_command_pool != VK_NULL_HANDLE) {
+                vkDestroyCommandPool(vk.device, m_command_pool, nullptr);
+                m_command_pool = VK_NULL_HANDLE;
+            }
+
+            cleanup_depth_buffer(vk);
+            cleanup_dmabuf_buffers(vk);
+
+            if (m_acquire_timeline.wtimeline) {
+                wp_linux_drm_syncobj_timeline_v1_destroy(m_acquire_timeline.wtimeline);
+                m_acquire_timeline.wtimeline = nullptr;
+            }
+            if (m_acquire_timeline.handle != 0 && vk.drm_fd >= 0) {
+                drmSyncobjDestroy(vk.drm_fd, m_acquire_timeline.handle);
+                m_acquire_timeline.handle = 0;
+            }
+
+            if (m_release_timeline.wtimeline) {
+                wp_linux_drm_syncobj_timeline_v1_destroy(m_release_timeline.wtimeline);
+                m_release_timeline.wtimeline = nullptr;
+            }
+            if (m_release_timeline.handle != 0 && vk.drm_fd >= 0) {
+                drmSyncobjDestroy(vk.drm_fd, m_release_timeline.handle);
+                m_release_timeline.handle = 0;
+            }
+        }
+
+        if (m_syncobj_surface) {
+            wp_linux_drm_syncobj_surface_v1_destroy(m_syncobj_surface);
+            m_syncobj_surface = nullptr;
+        }
+        if (m_toplevel_decoration) {
+            zxdg_toplevel_decoration_v1_destroy(m_toplevel_decoration);
+            m_toplevel_decoration = nullptr;
+        }
+        if (m_xdg_toplevel) {
+            xdg_toplevel_destroy(m_xdg_toplevel);
+            m_xdg_toplevel = nullptr;
+        }
+        if (m_xdg_surface) {
+            xdg_surface_destroy(m_xdg_surface);
+            m_xdg_surface = nullptr;
+        }
+        if (m_surface) {
+            wl_surface_destroy(m_surface);
+            m_surface = nullptr;
+        }
+    }
+
+    bool is_open() const { return m_open; }
+    bool is_configured() const { return m_configured; }
+
+    void handle_configure(uint32_t width, uint32_t height) {
+        if (width > 0 && height > 0) {
+            if (width != m_width || height != m_height) {
+                m_width = width;
+                m_height = height;
+                m_need_resize = true;
+            }
+        }
+        m_configured = true;
+    }
+
+    void handle_close() {
+        m_open = false;
+        std::println("Window '{}' closed by user.", m_title);
+    }
+
+    void render_frame(WaylandContext& wl, VulkanContext& vk, std::chrono::steady_clock::time_point start_time) {
+        if (!m_open || !m_configured) return;
+
+        if (m_need_resize) {
+            m_need_resize = false;
+            recreate_buffers(wl, vk);
+        }
+
+        auto& buf = m_buffers[m_current_buffer_idx];
+
+        // Explicit sync: Wait for the compositor to release this specific buffer
+        if (buf.last_release_point > 0) {
+            uint32_t release_handle = m_release_timeline.handle;
+            uint64_t release_point = buf.last_release_point;
+            drmSyncobjTimelineWait(vk.drm_fd, &release_handle, &release_point, 1, 1000000000ULL, DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT, nullptr);
+        }
+
+        vkWaitForFences(vk.device, 1, &m_in_flight_fences[m_current_buffer_idx], VK_TRUE, UINT64_MAX);
+        vkResetFences(vk.device, 1, &m_in_flight_fences[m_current_buffer_idx]);
+
+        auto cmd = m_command_buffers[m_current_buffer_idx];
+        vkResetCommandBuffer(cmd, 0);
+
+        VkCommandBufferBeginInfo begin_info{
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        };
+        vkBeginCommandBuffer(cmd, &begin_info);
+
+        auto now = std::chrono::steady_clock::now();
+        float time_sec = std::chrono::duration<float>(now - start_time).count();
+        VkClearColorValue clear_color = {
+            .float32 = {
+                0.06f + 0.03f * std::sin(time_sec),
+                0.06f + 0.03f * std::sin(time_sec + 2.0f),
+                0.09f + 0.03f * std::sin(time_sec + 4.0f),
+                1.0f
+            }
+        };
+
+        VkImageSubresourceRange color_subresource_range{
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        };
+
+        VkImageSubresourceRange depth_subresource_range{
+            .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        };
+
+        // Synchronization 2: Transition Color to COLOR_ATTACHMENT_OPTIMAL and Depth to DEPTH_ATTACHMENT_OPTIMAL
+        VkImageMemoryBarrier2 barriers[2] = {
+            {
+                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                .srcStageMask = VK_PIPELINE_STAGE_2_NONE,
+                .srcAccessMask = VK_ACCESS_2_NONE,
+                .dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                .dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image = buf.image,
+                .subresourceRange = color_subresource_range,
+            },
+            {
+                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                .srcStageMask = VK_PIPELINE_STAGE_2_NONE,
+                .srcAccessMask = VK_ACCESS_2_NONE,
+                .dstStageMask = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                .dstAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                .newLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image = m_depth.image,
+                .subresourceRange = depth_subresource_range,
+            }
+        };
+
+        VkDependencyInfo dep_pre_render{
+            .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+            .imageMemoryBarrierCount = 2,
+            .pImageMemoryBarriers = barriers,
+        };
+
+        vkCmdPipelineBarrier2(cmd, &dep_pre_render);
+
+        // Dynamic Rendering pass with Color & Depth attachments
+        VkRenderingAttachmentInfo color_attachment{
+            .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+            .imageView = buf.view,
+            .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+            .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+            .clearValue = {
+                .color = clear_color,
+            },
+        };
+
+        VkRenderingAttachmentInfo depth_attachment{
+            .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+            .imageView = m_depth.view,
+            .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+            .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            .clearValue = {
+                .depthStencil = { 1.0f, 0 },
+            },
+        };
+
+        VkRenderingInfo rendering_info{
+            .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+            .renderArea = {
+                .offset = {0, 0},
+                .extent = {m_width, m_height},
+            },
+            .layerCount = 1,
+            .colorAttachmentCount = 1,
+            .pColorAttachments = &color_attachment,
+            .pDepthAttachment = &depth_attachment,
+        };
+
+        vkCmdBeginRendering(cmd, &rendering_info);
+
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.pipeline);
+
+        // Compute 3D Matrices with GLM
+        float aspect = (m_height > 0) ? (static_cast<float>(m_width) / static_cast<float>(m_height)) : 1.0f;
+        glm::mat4 proj = glm::perspective(glm::radians(45.0f), aspect, 0.1f, 100.0f);
+        proj[1][1] *= -1.0f; // Invert Y for Vulkan viewport coordinate convention
+
+        glm::mat4 view = glm::lookAt(
+            glm::vec3(0.0f, 1.0f, 2.4f), // Eye
+            glm::vec3(0.0f, 0.0f, 0.0f), // Center
+            glm::vec3(0.0f, 1.0f, 0.0f)  // Up
+        );
+
+        glm::mat4 model = glm::mat4(1.0f);
+        model = glm::rotate(model, time_sec * m_rotation_speed * 0.9f, glm::vec3(0.0f, 1.0f, 0.0f));
+        model = glm::rotate(model, time_sec * m_rotation_speed * 0.6f, glm::vec3(1.0f, 0.0f, 0.0f));
+        model = glm::rotate(model, time_sec * m_rotation_speed * 0.3f, glm::vec3(0.0f, 0.0f, 1.0f));
+
+        glm::mat4 mvp = proj * view * model;
+
+        struct ShaderPushConstants {
+            glm::mat4 mvp;
+            glm::mat4 model;
+            glm::vec3 tint;
+            float _pad;
+        } pc = {
+            .mvp = mvp,
+            .model = model,
+            .tint = m_tint,
+            ._pad = 0.0f,
+        };
+
+        vkCmdPushConstants(
+            cmd,
+            vk.pipeline_layout,
+            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+            0,
+            sizeof(ShaderPushConstants),
+            &pc);
+
+        VkViewport viewport{
+            .x = 0.0f,
+            .y = 0.0f,
+            .width = static_cast<float>(m_width),
+            .height = static_cast<float>(m_height),
+            .minDepth = 0.0f,
+            .maxDepth = 1.0f,
+        };
+        vkCmdSetViewport(cmd, 0, 1, &viewport);
+
+        VkRect2D scissor{
+            .offset = {0, 0},
+            .extent = {m_width, m_height},
+        };
+        vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+        VkDeviceSize offsets[] = {0};
+        vkCmdBindVertexBuffers(cmd, 0, 1, &vk.vertex_buffer.buffer, offsets);
+        vkCmdBindIndexBuffer(cmd, vk.index_buffer.buffer, 0, VK_INDEX_TYPE_UINT16);
+
+        vkCmdDrawIndexed(cmd, static_cast<uint32_t>(CUBE_INDICES.size()), 1, 0, 0, 0);
+
+        vkCmdEndRendering(cmd);
+
+        // Synchronization 2: Transition Color from COLOR_ATTACHMENT_OPTIMAL to GENERAL
+        VkImageMemoryBarrier2 barrier_to_general{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+            .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+            .srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+            .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+            .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT,
+            .oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = buf.image,
+            .subresourceRange = color_subresource_range,
+        };
+
+        VkDependencyInfo dep_to_general{
+            .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+            .imageMemoryBarrierCount = 1,
+            .pImageMemoryBarriers = &barrier_to_general,
+        };
+
+        vkCmdPipelineBarrier2(cmd, &dep_to_general);
+
+        vkEndCommandBuffer(cmd);
+
+        VkSubmitInfo submit_info{
+            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            .commandBufferCount = 1,
+            .pCommandBuffers = &cmd,
+            .signalSemaphoreCount = 1,
+            .pSignalSemaphores = &m_render_complete_semaphores[m_current_buffer_idx],
+        };
+
+        if (vkQueueSubmit(vk.queue, 1, &submit_info, m_in_flight_fences[m_current_buffer_idx]) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to submit draw command buffer");
+        }
+
+        // Export sync_file from Vulkan semaphore
+        VkSemaphoreGetFdInfoKHR get_sem_fd_info{
+            .sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR,
+            .semaphore = m_render_complete_semaphores[m_current_buffer_idx],
+            .handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT,
+        };
+
+        int sync_file_fd = -1;
+        if (vkGetSemaphoreFdKHR(vk.device, &get_sem_fd_info, &sync_file_fd) != VK_SUCCESS || sync_file_fd < 0) {
+            throw std::runtime_error("Failed to export sync file fd from semaphore");
+        }
+
+        // Attach sync_file to DRM acquire timeline
+        timeline_attach_sync_fd(vk.drm_fd, m_acquire_timeline, sync_file_fd);
+
+        // Advance release timeline point for this buffer
+        m_release_timeline.point++;
+        buf.last_release_point = m_release_timeline.point;
+
+        // Set explicit sync points on Wayland surface
+        wp_linux_drm_syncobj_surface_v1_set_acquire_point(
+            m_syncobj_surface,
+            m_acquire_timeline.wtimeline,
+            m_acquire_timeline.point >> 32,
+            m_acquire_timeline.point & 0xffffffff);
+
+        wp_linux_drm_syncobj_surface_v1_set_release_point(
+            m_syncobj_surface,
+            m_release_timeline.wtimeline,
+            m_release_timeline.point >> 32,
+            m_release_timeline.point & 0xffffffff);
+
+        wl_surface_attach(m_surface, buf.wbuffer, 0, 0);
+        wl_surface_damage_buffer(m_surface, 0, 0, m_width, m_height);
+        wl_surface_commit(m_surface);
+
+        m_current_buffer_idx = (m_current_buffer_idx + 1) % BUFFER_POOL_SIZE;
+    }
+
+private:
+    void init_wayland_surface(WaylandContext& wl);
+    void init_drm_syncobj_timelines(WaylandContext& wl, VulkanContext& vk);
+    void create_dmabuf_buffers(WaylandContext& wl, VulkanContext& vk);
+    void cleanup_dmabuf_buffers(VulkanContext& vk);
+    void create_depth_buffer(VulkanContext& vk);
+    void cleanup_depth_buffer(VulkanContext& vk);
+    void recreate_buffers(WaylandContext& wl, VulkanContext& vk);
+    void create_command_resources(VulkanContext& vk);
+
+    std::string m_title;
+    uint32_t m_width{800};
+    uint32_t m_height{600};
+    float m_rotation_speed{1.0f};
+    glm::vec3 m_tint{1.0f, 1.0f, 1.0f};
+
+    bool m_configured{false};
+    bool m_open{true};
+    bool m_need_resize{false};
+
+    wl_surface* m_surface{nullptr};
+    xdg_surface* m_xdg_surface{nullptr};
+    xdg_toplevel* m_xdg_toplevel{nullptr};
+    zxdg_toplevel_decoration_v1* m_toplevel_decoration{nullptr};
+    wp_linux_drm_syncobj_surface_v1* m_syncobj_surface{nullptr};
+
+    DrmTimeline m_acquire_timeline{};
+    DrmTimeline m_release_timeline{};
+
+    std::vector<DmaBufBuffer> m_buffers;
+    DepthBuffer m_depth{};
+    size_t m_current_buffer_idx{0};
+
+    VkCommandPool m_command_pool{VK_NULL_HANDLE};
+    std::vector<VkCommandBuffer> m_command_buffers;
+    std::vector<VkFence> m_in_flight_fences;
+    std::vector<VkSemaphore> m_render_complete_semaphores;
+};
+
+// XDG Surface listener
+void xdg_surface_configure_handler(void* data, xdg_surface* surface, uint32_t serial) {
+    auto* win = static_cast<AppWindow*>(data);
+    xdg_surface_ack_configure(surface, serial);
+    win->handle_configure(0, 0);
+}
+
+const xdg_surface_listener surface_listener = {
+    .configure = xdg_surface_configure_handler,
+};
+
+// XDG Toplevel listener
+void xdg_toplevel_configure_handler(void* data, xdg_toplevel*, int32_t width, int32_t height, wl_array*) {
+    auto* win = static_cast<AppWindow*>(data);
+    if (width > 0 && height > 0) {
+        win->handle_configure(static_cast<uint32_t>(width), static_cast<uint32_t>(height));
+    }
+}
+
+void xdg_toplevel_close_handler(void* data, xdg_toplevel*) {
+    auto* win = static_cast<AppWindow*>(data);
+    win->handle_close();
+}
+
+const xdg_toplevel_listener toplevel_listener = {
+    .configure = xdg_toplevel_configure_handler,
+    .close = xdg_toplevel_close_handler,
+};
+
+// XDG Toplevel Decoration listener
+void toplevel_decoration_configure_handler(void*, zxdg_toplevel_decoration_v1*, uint32_t) {}
+
+const zxdg_toplevel_decoration_v1_listener decoration_listener = {
+    .configure = toplevel_decoration_configure_handler,
 };
 
 // XDG WM Base Ping listener
@@ -180,44 +684,11 @@ const xdg_wm_base_listener wm_base_listener = {
     .ping = xdg_wm_base_ping_handler,
 };
 
-// XDG Surface listener
-void xdg_surface_configure_handler(void* data, xdg_surface* surface, uint32_t serial) {
-    auto* app = static_cast<WaylandState*>(data);
-    xdg_surface_ack_configure(surface, serial);
-    app->configured = true;
-}
-
-const xdg_surface_listener surface_listener = {
-    .configure = xdg_surface_configure_handler,
-};
-
-// XDG Toplevel listener
-void xdg_toplevel_configure_handler(void* data, xdg_toplevel*, int32_t width, int32_t height, wl_array*) {
-    auto* app = static_cast<WaylandState*>(data);
-    if (width > 0 && height > 0) {
-        if (static_cast<uint32_t>(width) != app->width || static_cast<uint32_t>(height) != app->height) {
-            app->width = static_cast<uint32_t>(width);
-            app->height = static_cast<uint32_t>(height);
-            app->need_resize = true;
-        }
-    }
-}
-
-void xdg_toplevel_close_handler(void* data, xdg_toplevel*) {
-    auto* app = static_cast<WaylandState*>(data);
-    app->running = false;
-}
-
-const xdg_toplevel_listener toplevel_listener = {
-    .configure = xdg_toplevel_configure_handler,
-    .close = xdg_toplevel_close_handler,
-};
-
 // Dma-buf modifier listener
 void dmabuf_format_handler(void*, zwp_linux_dmabuf_v1*, uint32_t) {}
 
 void dmabuf_modifier_handler(void* data, zwp_linux_dmabuf_v1*, uint32_t format, uint32_t modifier_hi, uint32_t modifier_lo) {
-    auto* app = static_cast<WaylandState*>(data);
+    auto* app = static_cast<WaylandContext*>(data);
     if (format == DRM_FORMAT_ARGB8888 || format == DRM_FORMAT_XRGB8888) {
         uint64_t mod = (static_cast<uint64_t>(modifier_hi) << 32) | modifier_lo;
         if (mod != DRM_FORMAT_MOD_INVALID) {
@@ -231,22 +702,9 @@ const zwp_linux_dmabuf_v1_listener dmabuf_listener = {
     .modifier = dmabuf_modifier_handler,
 };
 
-// XDG Toplevel Decoration listener
-void toplevel_decoration_configure_handler(void*, zxdg_toplevel_decoration_v1*, uint32_t mode) {
-    if (mode == ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE) {
-        std::println("Wayland: Server-side decoration (SSD) configured.");
-    } else if (mode == ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE) {
-        std::println("Wayland: Client-side decoration (CSD) requested by compositor.");
-    }
-}
-
-const zxdg_toplevel_decoration_v1_listener decoration_listener = {
-    .configure = toplevel_decoration_configure_handler,
-};
-
 // Wayland Registry listener
 void registry_global_handler(void* data, wl_registry* registry, uint32_t name, const char* interface, uint32_t version) {
-    auto* app = static_cast<WaylandState*>(data);
+    auto* app = static_cast<WaylandContext*>(data);
     if (std::strcmp(interface, wl_compositor_interface.name) == 0) {
         app->compositor = static_cast<wl_compositor*>(
             wl_registry_bind(registry, name, &wl_compositor_interface, std::min(version, 4u)));
@@ -274,7 +732,7 @@ const wl_registry_listener registry_listener = {
     .global_remove = registry_global_remove_handler,
 };
 
-void init_wayland(WaylandState& wl) {
+void init_wayland_context(WaylandContext& wl) {
     wl.display = wl_display_connect(nullptr);
     if (!wl.display) {
         throw std::runtime_error("Failed to connect to Wayland display server");
@@ -288,49 +746,11 @@ void init_wayland(WaylandState& wl) {
         throw std::runtime_error("Compositor missing required interfaces: wl_compositor, xdg_wm_base, zwp_linux_dmabuf_v1, or wp_linux_drm_syncobj_manager_v1");
     }
 
-    // Roundtrip again to collect dmabuf modifiers
-    wl_display_roundtrip(wl.display);
-
-    wl.surface = wl_compositor_create_surface(wl.compositor);
-    if (!wl.surface) {
-        throw std::runtime_error("Failed to create Wayland surface");
-    }
-
-    wl.xdg_surface = xdg_wm_base_get_xdg_surface(wl.wm_base, wl.surface);
-    xdg_surface_add_listener(wl.xdg_surface, &surface_listener, &wl);
-
-    wl.xdg_toplevel = xdg_surface_get_toplevel(wl.xdg_surface);
-    xdg_toplevel_add_listener(wl.xdg_toplevel, &toplevel_listener, &wl);
-    xdg_toplevel_set_title(wl.xdg_toplevel, "Vulkan Dynamic Rendering Slang Triangle (C++26)");
-    xdg_toplevel_set_app_id(wl.xdg_toplevel, "codotaku.vulkan.triangle");
-    xdg_toplevel_set_min_size(wl.xdg_toplevel, 100, 100);
-
-    // Request Server-Side Decoration if available
-    if (wl.decoration_mgr && wl.xdg_toplevel) {
-        wl.toplevel_decoration = zxdg_decoration_manager_v1_get_toplevel_decoration(
-            wl.decoration_mgr, wl.xdg_toplevel);
-        zxdg_toplevel_decoration_v1_add_listener(wl.toplevel_decoration, &decoration_listener, &wl);
-        zxdg_toplevel_decoration_v1_set_mode(
-            wl.toplevel_decoration, ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
-        std::println("Wayland: Requested Server-Side Decorations (zxdg_decoration_manager_v1).");
-    }
-
-    wl.syncobj_surface = wp_linux_drm_syncobj_manager_v1_get_surface(wl.syncobj_mgr, wl.surface);
-    if (!wl.syncobj_surface) {
-        throw std::runtime_error("Failed to create wp_linux_drm_syncobj_surface_v1");
-    }
-
-    wl_surface_commit(wl.surface);
     wl_display_roundtrip(wl.display);
 }
 
-void cleanup_wayland(WaylandState& wl) {
-    if (wl.syncobj_surface) wp_linux_drm_syncobj_surface_v1_destroy(wl.syncobj_surface);
-    if (wl.toplevel_decoration) zxdg_toplevel_decoration_v1_destroy(wl.toplevel_decoration);
+void cleanup_wayland_context(WaylandContext& wl) {
     if (wl.decoration_mgr) zxdg_decoration_manager_v1_destroy(wl.decoration_mgr);
-    if (wl.xdg_toplevel) xdg_toplevel_destroy(wl.xdg_toplevel);
-    if (wl.xdg_surface) xdg_surface_destroy(wl.xdg_surface);
-    if (wl.surface) wl_surface_destroy(wl.surface);
     if (wl.syncobj_mgr) wp_linux_drm_syncobj_manager_v1_destroy(wl.syncobj_mgr);
     if (wl.dmabuf) zwp_linux_dmabuf_v1_destroy(wl.dmabuf);
     if (wl.wm_base) xdg_wm_base_destroy(wl.wm_base);
@@ -339,207 +759,40 @@ void cleanup_wayland(WaylandState& wl) {
     if (wl.display) wl_display_disconnect(wl.display);
 }
 
-static VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback(
-    VkDebugUtilsMessageSeverityFlagBitsEXT severity,
-    VkDebugUtilsMessageTypeFlagsEXT,
-    const VkDebugUtilsMessengerCallbackDataEXT* callback_data,
-    void*) {
-    if (severity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) {
-        std::println(stderr, "[Vulkan Error]: {}", callback_data->pMessage);
-    } else if (severity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) {
-        std::println(stderr, "[Vulkan Warning]: {}", callback_data->pMessage);
+void AppWindow::init_wayland_surface(WaylandContext& wl) {
+    m_surface = wl_compositor_create_surface(wl.compositor);
+    if (!m_surface) {
+        throw std::runtime_error("Failed to create Wayland surface for window: " + m_title);
     }
-    return VK_FALSE;
+
+    m_xdg_surface = xdg_wm_base_get_xdg_surface(wl.wm_base, m_surface);
+    xdg_surface_add_listener(m_xdg_surface, &surface_listener, this);
+
+    m_xdg_toplevel = xdg_surface_get_toplevel(m_xdg_surface);
+    xdg_toplevel_add_listener(m_xdg_toplevel, &toplevel_listener, this);
+    xdg_toplevel_set_title(m_xdg_toplevel, m_title.c_str());
+    xdg_toplevel_set_app_id(m_xdg_toplevel, "codotaku.vulkan.multiwindow");
+    xdg_toplevel_set_min_size(m_xdg_toplevel, 100, 100);
+
+    if (wl.decoration_mgr) {
+        m_toplevel_decoration = zxdg_decoration_manager_v1_get_toplevel_decoration(
+            wl.decoration_mgr, m_xdg_toplevel);
+        zxdg_toplevel_decoration_v1_add_listener(m_toplevel_decoration, &decoration_listener, this);
+        zxdg_toplevel_decoration_v1_set_mode(
+            m_toplevel_decoration, ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+    }
+
+    m_syncobj_surface = wp_linux_drm_syncobj_manager_v1_get_surface(wl.syncobj_mgr, m_surface);
+    if (!m_syncobj_surface) {
+        throw std::runtime_error("Failed to create wp_linux_drm_syncobj_surface_v1 for window: " + m_title);
+    }
+
+    wl_surface_commit(m_surface);
+    wl_display_roundtrip(wl.display);
 }
 
-void init_vulkan_instance(VulkanState& vk) {
-    if (volkInitialize() != VK_SUCCESS) {
-        throw std::runtime_error("Failed to initialize Volk");
-    }
-
-    VkApplicationInfo app_info{
-        .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
-        .pApplicationName = "Vulkan Slang Dynamic Rendering Triangle",
-        .applicationVersion = VK_MAKE_VERSION(1, 0, 0),
-        .pEngineName = "No Engine",
-        .engineVersion = VK_MAKE_VERSION(1, 0, 0),
-        .apiVersion = VK_API_VERSION_1_4,
-    };
-
-    uint32_t layer_count = 0;
-    vkEnumerateInstanceLayerProperties(&layer_count, nullptr);
-    std::vector<VkLayerProperties> available_layers(layer_count);
-    vkEnumerateInstanceLayerProperties(&layer_count, available_layers.data());
-
-    std::vector<const char*> enabled_layers;
-    const char* validation_layer = "VK_LAYER_KHRONOS_validation";
-    bool validation_found = std::ranges::any_of(available_layers, [&](const auto& layer) {
-        return std::strcmp(layer.layerName, validation_layer) == 0;
-    });
-
-    if (validation_found) {
-        enabled_layers.push_back(validation_layer);
-        std::println("Enabled Vulkan validation layer: {}", validation_layer);
-    }
-
-    uint32_t ext_count = 0;
-    vkEnumerateInstanceExtensionProperties(nullptr, &ext_count, nullptr);
-    std::vector<VkExtensionProperties> available_extensions(ext_count);
-    vkEnumerateInstanceExtensionProperties(nullptr, &ext_count, available_extensions.data());
-
-    std::vector<const char*> enabled_extensions;
-    bool debug_utils_found = std::ranges::any_of(available_extensions, [&](const auto& ext) {
-        return std::strcmp(ext.extensionName, VK_EXT_DEBUG_UTILS_EXTENSION_NAME) == 0;
-    });
-
-    if (debug_utils_found) {
-        enabled_extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
-    }
-
-    VkDebugUtilsMessengerCreateInfoEXT debug_create_info{
-        .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
-        .messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
-                           VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
-        .messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
-                       VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
-                       VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
-        .pfnUserCallback = debug_callback,
-    };
-
-    VkInstanceCreateInfo create_info{
-        .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-        .pNext = debug_utils_found ? &debug_create_info : nullptr,
-        .pApplicationInfo = &app_info,
-        .enabledLayerCount = static_cast<uint32_t>(enabled_layers.size()),
-        .ppEnabledLayerNames = enabled_layers.data(),
-        .enabledExtensionCount = static_cast<uint32_t>(enabled_extensions.size()),
-        .ppEnabledExtensionNames = enabled_extensions.data(),
-    };
-
-    if (vkCreateInstance(&create_info, nullptr, &vk.instance) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create Vulkan instance");
-    }
-
-    volkLoadInstance(vk.instance);
-
-    if (debug_utils_found && vkCreateDebugUtilsMessengerEXT) {
-        vkCreateDebugUtilsMessengerEXT(vk.instance, &debug_create_info, nullptr, &vk.debug_messenger);
-    }
-}
-
-void select_physical_device_and_queue(VulkanState& vk) {
-    uint32_t device_count = 0;
-    vkEnumeratePhysicalDevices(vk.instance, &device_count, nullptr);
-    if (device_count == 0) {
-        throw std::runtime_error("No Vulkan capable GPU found");
-    }
-
-    std::vector<VkPhysicalDevice> devices(device_count);
-    vkEnumeratePhysicalDevices(vk.instance, &device_count, devices.data());
-
-    for (const auto& device : devices) {
-        uint32_t queue_family_count = 0;
-        vkGetPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, nullptr);
-        std::vector<VkQueueFamilyProperties> queue_families(queue_family_count);
-        vkGetPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, queue_families.data());
-
-        for (uint32_t i = 0; i < queue_family_count; ++i) {
-            if (queue_families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
-                vk.physical_device = device;
-                vk.queue_family_index = i;
-                break;
-            }
-        }
-        if (vk.physical_device != VK_NULL_HANDLE) {
-            break;
-        }
-    }
-
-    if (vk.physical_device == VK_NULL_HANDLE) {
-        throw std::runtime_error("Failed to find a suitable GPU with Graphics support");
-    }
-
-    vkGetPhysicalDeviceMemoryProperties(vk.physical_device, &vk.memory_properties);
-
-    VkPhysicalDeviceProperties props;
-    vkGetPhysicalDeviceProperties(vk.physical_device, &props);
-    std::println("Using GPU: {}", props.deviceName);
-}
-
-void create_logical_device(VulkanState& vk) {
-    float queue_priority = 1.0f;
-    VkDeviceQueueCreateInfo queue_create_info{
-        .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-        .queueFamilyIndex = vk.queue_family_index,
-        .queueCount = 1,
-        .pQueuePriorities = &queue_priority,
-    };
-
-    const std::vector<const char*> device_extensions = {
-        VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
-        VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME,
-        VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME,
-        VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME,
-    };
-
-    VkPhysicalDeviceFeatures features{};
-
-    VkPhysicalDeviceVulkan13Features vulkan13_features{
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
-        .synchronization2 = VK_TRUE,
-        .dynamicRendering = VK_TRUE,
-    };
-
-    VkDeviceCreateInfo device_create_info{
-        .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-        .pNext = &vulkan13_features,
-        .queueCreateInfoCount = 1,
-        .pQueueCreateInfos = &queue_create_info,
-        .enabledExtensionCount = static_cast<uint32_t>(device_extensions.size()),
-        .ppEnabledExtensionNames = device_extensions.data(),
-        .pEnabledFeatures = &features,
-    };
-
-    if (vkCreateDevice(vk.physical_device, &device_create_info, nullptr, &vk.device) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create Vulkan logical device with DMA-BUF, Dynamic Rendering & Explicit Sync");
-    }
-
-    volkLoadDevice(vk.device);
-    vkGetDeviceQueue(vk.device, vk.queue_family_index, 0, &vk.queue);
-}
-
-void create_vma_allocator(VulkanState& vk) {
-    VmaVulkanFunctions vulkan_functions{};
-    VmaAllocatorCreateInfo allocator_info{
-        .flags = 0,
-        .physicalDevice = vk.physical_device,
-        .device = vk.device,
-        .instance = vk.instance,
-        .vulkanApiVersion = VK_API_VERSION_1_4,
-    };
-
-    if (vmaImportVulkanFunctionsFromVolk(&allocator_info, &vulkan_functions) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to import Vulkan functions for VMA from Volk");
-    }
-
-    allocator_info.pVulkanFunctions = &vulkan_functions;
-
-    if (vmaCreateAllocator(&allocator_info, &vk.allocator) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create Vulkan Memory Allocator (VMA)");
-    }
-    std::println("VMA initialized with Volk successfully.");
-}
-
-void init_drm_syncobj_timelines(WaylandState& wl, VulkanState& vk) {
-    vk.drm_fd = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
-    if (vk.drm_fd < 0) {
-        vk.drm_fd = open("/dev/dri/card1", O_RDWR | O_CLOEXEC);
-    }
-    if (vk.drm_fd < 0) {
-        throw std::runtime_error("Failed to open DRM device (/dev/dri/renderD128 or /dev/dri/card1)");
-    }
-
-    auto init_timeline = [&](DrmTimeline& timeline) {
+void AppWindow::init_drm_syncobj_timelines(WaylandContext& wl, VulkanContext& vk) {
+    auto init_tl = [&](DrmTimeline& timeline) {
         if (drmSyncobjCreate(vk.drm_fd, 0, &timeline.handle) != 0) {
             throw std::runtime_error("Failed to create DRM syncobj");
         }
@@ -558,27 +811,12 @@ void init_drm_syncobj_timelines(WaylandState& wl, VulkanState& vk) {
         timeline.point = 0;
     };
 
-    init_timeline(vk.acquire_timeline);
-    init_timeline(vk.release_timeline);
-    std::println("DRM syncobj acquire and release timelines initialized successfully.");
+    init_tl(m_acquire_timeline);
+    init_tl(m_release_timeline);
 }
 
-uint32_t find_memory_type(const VkPhysicalDeviceMemoryProperties& mem_props, uint32_t type_filter, VkMemoryPropertyFlags properties) {
-    for (uint32_t i = 0; i < mem_props.memoryTypeCount; ++i) {
-        if ((type_filter & (1 << i)) && (mem_props.memoryTypes[i].propertyFlags & properties) == properties) {
-            return i;
-        }
-    }
-    for (uint32_t i = 0; i < mem_props.memoryTypeCount; ++i) {
-        if (type_filter & (1 << i)) {
-            return i;
-        }
-    }
-    throw std::runtime_error("Failed to find suitable memory type");
-}
-
-void create_dmabuf_buffers(WaylandState& wl, VulkanState& vk) {
-    vk.buffers.resize(BUFFER_POOL_SIZE);
+void AppWindow::create_dmabuf_buffers(WaylandContext& wl, VulkanContext& vk) {
+    m_buffers.resize(BUFFER_POOL_SIZE);
 
     std::vector<uint64_t> modifiers = wl.supported_modifiers;
     if (modifiers.empty()) {
@@ -586,7 +824,7 @@ void create_dmabuf_buffers(WaylandState& wl, VulkanState& vk) {
     }
 
     for (size_t i = 0; i < BUFFER_POOL_SIZE; ++i) {
-        auto& buf = vk.buffers[i];
+        auto& buf = m_buffers[i];
 
         VkExternalMemoryImageCreateInfo external_img_info{
             .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
@@ -605,7 +843,7 @@ void create_dmabuf_buffers(WaylandState& wl, VulkanState& vk) {
             .pNext = &mod_list,
             .imageType = VK_IMAGE_TYPE_2D,
             .format = VK_FORMAT_B8G8R8A8_UNORM,
-            .extent = { wl.width, wl.height, 1 },
+            .extent = { m_width, m_height, 1 },
             .mipLevels = 1,
             .arrayLayers = 1,
             .samples = VK_SAMPLE_COUNT_1_BIT,
@@ -616,7 +854,7 @@ void create_dmabuf_buffers(WaylandState& wl, VulkanState& vk) {
         };
 
         if (vkCreateImage(vk.device, &image_info, nullptr, &buf.image) != VK_SUCCESS) {
-            throw std::runtime_error("Failed to create DRM format modifier image");
+            throw std::runtime_error("Failed to create DRM format modifier image for window: " + m_title);
         }
 
         VkMemoryRequirements mem_reqs;
@@ -691,8 +929,8 @@ void create_dmabuf_buffers(WaylandState& wl, VulkanState& vk) {
 
         buf.wbuffer = zwp_linux_buffer_params_v1_create_immed(
             params,
-            wl.width,
-            wl.height,
+            m_width,
+            m_height,
             DRM_FORMAT_ARGB8888,
             0);
         zwp_linux_buffer_params_v1_destroy(params);
@@ -728,11 +966,65 @@ void create_dmabuf_buffers(WaylandState& wl, VulkanState& vk) {
         buf.last_release_point = 0;
     }
 
-    std::println("Created {} DMA-BUF present buffers ({}x{})", BUFFER_POOL_SIZE, wl.width, wl.height);
+    std::println("Window '{}': Created {} DMA-BUF present buffers ({}x{})", m_title, BUFFER_POOL_SIZE, m_width, m_height);
 }
 
-void cleanup_dmabuf_buffers(VulkanState& vk) {
-    for (auto& buf : vk.buffers) {
+void AppWindow::create_depth_buffer(VulkanContext& vk) {
+    VkImageCreateInfo image_info{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .format = DEPTH_FORMAT,
+        .extent = { m_width, m_height, 1 },
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+    };
+
+    VmaAllocationCreateInfo alloc_info{
+        .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+    };
+
+    if (vmaCreateImage(vk.allocator, &image_info, &alloc_info, &m_depth.image, &m_depth.allocation, nullptr) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to allocate depth image via VMA for window: " + m_title);
+    }
+
+    VkImageViewCreateInfo view_info{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image = m_depth.image,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format = DEPTH_FORMAT,
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+    };
+
+    if (vkCreateImageView(vk.device, &view_info, nullptr, &m_depth.view) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create depth image view for window: " + m_title);
+    }
+}
+
+void AppWindow::cleanup_depth_buffer(VulkanContext& vk) {
+    if (m_depth.view != VK_NULL_HANDLE) {
+        vkDestroyImageView(vk.device, m_depth.view, nullptr);
+        m_depth.view = VK_NULL_HANDLE;
+    }
+    if (m_depth.image != VK_NULL_HANDLE) {
+        vmaDestroyImage(vk.allocator, m_depth.image, m_depth.allocation);
+        m_depth.image = VK_NULL_HANDLE;
+        m_depth.allocation = VK_NULL_HANDLE;
+    }
+}
+
+void AppWindow::cleanup_dmabuf_buffers(VulkanContext& vk) {
+    for (auto& buf : m_buffers) {
         if (buf.wbuffer) {
             wl_buffer_destroy(buf.wbuffer);
             buf.wbuffer = nullptr;
@@ -754,20 +1046,270 @@ void cleanup_dmabuf_buffers(VulkanState& vk) {
             buf.memory = VK_NULL_HANDLE;
         }
     }
-    vk.buffers.clear();
+    m_buffers.clear();
 }
 
-void recreate_buffers(WaylandState& wl, VulkanState& vk) {
+void AppWindow::recreate_buffers(WaylandContext& wl, VulkanContext& vk) {
     vkDeviceWaitIdle(vk.device);
+    cleanup_depth_buffer(vk);
     cleanup_dmabuf_buffers(vk);
     create_dmabuf_buffers(wl, vk);
-    vk.current_buffer_idx = 0;
+    create_depth_buffer(vk);
+    m_current_buffer_idx = 0;
 }
 
-void create_vertex_buffer(VulkanState& vk) {
-    VkBufferCreateInfo buffer_info{
+void AppWindow::create_command_resources(VulkanContext& vk) {
+    VkCommandPoolCreateInfo pool_info{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+        .queueFamilyIndex = vk.queue_family_index,
+    };
+
+    if (vkCreateCommandPool(vk.device, &pool_info, nullptr, &m_command_pool) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create Vulkan command pool for window: " + m_title);
+    }
+
+    m_command_buffers.resize(BUFFER_POOL_SIZE);
+    VkCommandBufferAllocateInfo alloc_info{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = m_command_pool,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = static_cast<uint32_t>(BUFFER_POOL_SIZE),
+    };
+
+    if (vkAllocateCommandBuffers(vk.device, &alloc_info, m_command_buffers.data()) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to allocate command buffers for window: " + m_title);
+    }
+
+    m_in_flight_fences.resize(BUFFER_POOL_SIZE);
+    VkFenceCreateInfo fence_info{
+        .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+        .flags = VK_FENCE_CREATE_SIGNALED_BIT,
+    };
+    for (size_t i = 0; i < BUFFER_POOL_SIZE; ++i) {
+        if (vkCreateFence(vk.device, &fence_info, nullptr, &m_in_flight_fences[i]) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create in-flight fence");
+        }
+    }
+
+    m_render_complete_semaphores.resize(BUFFER_POOL_SIZE);
+    VkExportSemaphoreCreateInfo export_sem_info{
+        .sType = VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO,
+        .handleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT,
+    };
+    VkSemaphoreCreateInfo sem_info{
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+        .pNext = &export_sem_info,
+    };
+    for (size_t i = 0; i < BUFFER_POOL_SIZE; ++i) {
+        if (vkCreateSemaphore(vk.device, &sem_info, nullptr, &m_render_complete_semaphores[i]) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create persistent exportable semaphore");
+        }
+    }
+}
+
+static VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback(
+    VkDebugUtilsMessageSeverityFlagBitsEXT severity,
+    VkDebugUtilsMessageTypeFlagsEXT,
+    const VkDebugUtilsMessengerCallbackDataEXT* callback_data,
+    void*) {
+    if (severity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) {
+        std::println(stderr, "[Vulkan Error]: {}", callback_data->pMessage);
+    } else if (severity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) {
+        std::println(stderr, "[Vulkan Warning]: {}", callback_data->pMessage);
+    }
+    return VK_FALSE;
+}
+
+void init_vulkan_context(VulkanContext& vk) {
+    if (volkInitialize() != VK_SUCCESS) {
+        throw std::runtime_error("Failed to initialize Volk");
+    }
+
+    VkApplicationInfo app_info{
+        .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
+        .pApplicationName = "Vulkan 3D Cube Multi-Window App",
+        .applicationVersion = VK_MAKE_VERSION(1, 0, 0),
+        .pEngineName = "No Engine",
+        .engineVersion = VK_MAKE_VERSION(1, 0, 0),
+        .apiVersion = VK_API_VERSION_1_4,
+    };
+
+    uint32_t layer_count = 0;
+    vkEnumerateInstanceLayerProperties(&layer_count, nullptr);
+    std::vector<VkLayerProperties> available_layers(layer_count);
+    vkEnumerateInstanceLayerProperties(&layer_count, available_layers.data());
+
+    std::vector<const char*> enabled_layers;
+    const char* validation_layer = "VK_LAYER_KHRONOS_validation";
+    bool validation_found = std::ranges::any_of(available_layers, [&](const auto& layer) {
+        return std::strcmp(layer.layerName, validation_layer) == 0;
+    });
+
+    if (validation_found) {
+        enabled_layers.push_back(validation_layer);
+        std::println("Enabled Vulkan validation layer: {}", validation_layer);
+    }
+
+    uint32_t ext_count = 0;
+    vkEnumerateInstanceExtensionProperties(nullptr, &ext_count, nullptr);
+    std::vector<VkExtensionProperties> available_extensions(ext_count);
+    vkEnumerateInstanceExtensionProperties(nullptr, &ext_count, available_extensions.data());
+
+    std::vector<const char*> enabled_extensions;
+    bool debug_utils_found = std::ranges::any_of(available_extensions, [&](const auto& ext) {
+        return std::strcmp(ext.extensionName, VK_EXT_DEBUG_UTILS_EXTENSION_NAME) == 0;
+    });
+
+    if (debug_utils_found) {
+        enabled_extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+    }
+
+    VkDebugUtilsMessengerCreateInfoEXT debug_create_info{
+        .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+        .messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+                           VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
+        .messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+                       VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+                       VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
+        .pfnUserCallback = debug_callback,
+    };
+
+    VkInstanceCreateInfo create_info{
+        .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+        .pNext = debug_utils_found ? &debug_create_info : nullptr,
+        .pApplicationInfo = &app_info,
+        .enabledLayerCount = static_cast<uint32_t>(enabled_layers.size()),
+        .ppEnabledLayerNames = enabled_layers.data(),
+        .enabledExtensionCount = static_cast<uint32_t>(enabled_extensions.size()),
+        .ppEnabledExtensionNames = enabled_extensions.data(),
+    };
+
+    if (vkCreateInstance(&create_info, nullptr, &vk.instance) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create Vulkan instance");
+    }
+
+    volkLoadInstance(vk.instance);
+
+    if (debug_utils_found && vkCreateDebugUtilsMessengerEXT) {
+        vkCreateDebugUtilsMessengerEXT(vk.instance, &debug_create_info, nullptr, &vk.debug_messenger);
+    }
+
+    // Pick GPU
+    uint32_t device_count = 0;
+    vkEnumeratePhysicalDevices(vk.instance, &device_count, nullptr);
+    if (device_count == 0) {
+        throw std::runtime_error("No Vulkan capable GPU found");
+    }
+
+    std::vector<VkPhysicalDevice> devices(device_count);
+    vkEnumeratePhysicalDevices(vk.instance, &device_count, devices.data());
+
+    for (const auto& device : devices) {
+        uint32_t queue_family_count = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, nullptr);
+        std::vector<VkQueueFamilyProperties> queue_families(queue_family_count);
+        vkGetPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, queue_families.data());
+
+        for (uint32_t i = 0; i < queue_family_count; ++i) {
+            if (queue_families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
+                vk.physical_device = device;
+                vk.queue_family_index = i;
+                break;
+            }
+        }
+        if (vk.physical_device != VK_NULL_HANDLE) {
+            break;
+        }
+    }
+
+    if (vk.physical_device == VK_NULL_HANDLE) {
+        throw std::runtime_error("Failed to find a suitable GPU with Graphics support");
+    }
+
+    vkGetPhysicalDeviceMemoryProperties(vk.physical_device, &vk.memory_properties);
+
+    VkPhysicalDeviceProperties props;
+    vkGetPhysicalDeviceProperties(vk.physical_device, &props);
+    std::println("Using GPU: {}", props.deviceName);
+
+    // Create Logical Device
+    float queue_priority = 1.0f;
+    VkDeviceQueueCreateInfo queue_create_info{
+        .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+        .queueFamilyIndex = vk.queue_family_index,
+        .queueCount = 1,
+        .pQueuePriorities = &queue_priority,
+    };
+
+    const std::vector<const char*> device_extensions = {
+        VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
+        VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME,
+        VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME,
+        VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME,
+    };
+
+    VkPhysicalDeviceFeatures features{};
+
+    VkPhysicalDeviceVulkan13Features vulkan13_features{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+        .synchronization2 = VK_TRUE,
+        .dynamicRendering = VK_TRUE,
+    };
+
+    VkDeviceCreateInfo device_create_info{
+        .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+        .pNext = &vulkan13_features,
+        .queueCreateInfoCount = 1,
+        .pQueueCreateInfos = &queue_create_info,
+        .enabledExtensionCount = static_cast<uint32_t>(device_extensions.size()),
+        .ppEnabledExtensionNames = device_extensions.data(),
+        .pEnabledFeatures = &features,
+    };
+
+    if (vkCreateDevice(vk.physical_device, &device_create_info, nullptr, &vk.device) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create Vulkan logical device");
+    }
+
+    volkLoadDevice(vk.device);
+    vkGetDeviceQueue(vk.device, vk.queue_family_index, 0, &vk.queue);
+
+    // Initialize VMA
+    VmaVulkanFunctions vulkan_functions{};
+    VmaAllocatorCreateInfo allocator_info{
+        .flags = 0,
+        .physicalDevice = vk.physical_device,
+        .device = vk.device,
+        .instance = vk.instance,
+        .vulkanApiVersion = VK_API_VERSION_1_4,
+    };
+
+    if (vmaImportVulkanFunctionsFromVolk(&allocator_info, &vulkan_functions) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to import Vulkan functions for VMA from Volk");
+    }
+
+    allocator_info.pVulkanFunctions = &vulkan_functions;
+
+    if (vmaCreateAllocator(&allocator_info, &vk.allocator) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create Vulkan Memory Allocator (VMA)");
+    }
+    std::println("VMA initialized with Volk successfully.");
+
+    // Open DRM Node
+    vk.drm_fd = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
+    if (vk.drm_fd < 0) {
+        vk.drm_fd = open("/dev/dri/card1", O_RDWR | O_CLOEXEC);
+    }
+    if (vk.drm_fd < 0) {
+        throw std::runtime_error("Failed to open DRM device (/dev/dri/renderD128 or /dev/dri/card1)");
+    }
+}
+
+void create_shared_mesh_buffers(VulkanContext& vk) {
+    // 1. Vertex Buffer
+    VkBufferCreateInfo vb_info{
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .size = sizeof(Vertex) * TRIANGLE_VERTICES.size(),
+        .size = sizeof(Vertex) * CUBE_VERTICES.size(),
         .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
     };
@@ -777,13 +1319,27 @@ void create_vertex_buffer(VulkanState& vk) {
         .usage = VMA_MEMORY_USAGE_AUTO,
     };
 
-    VmaAllocationInfo allocation_info{};
-    if (vmaCreateBuffer(vk.allocator, &buffer_info, &alloc_info, &vk.vertex_buffer.buffer, &vk.vertex_buffer.allocation, &allocation_info) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create triangle vertex buffer with VMA");
+    VmaAllocationInfo vb_alloc_info{};
+    if (vmaCreateBuffer(vk.allocator, &vb_info, &alloc_info, &vk.vertex_buffer.buffer, &vk.vertex_buffer.allocation, &vb_alloc_info) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create 3D cube vertex buffer with VMA");
     }
+    std::memcpy(vb_alloc_info.pMappedData, CUBE_VERTICES.data(), sizeof(Vertex) * CUBE_VERTICES.size());
 
-    std::memcpy(allocation_info.pMappedData, TRIANGLE_VERTICES.data(), sizeof(Vertex) * TRIANGLE_VERTICES.size());
-    std::println("Created triangle vertex buffer via VMA ({} vertices)", TRIANGLE_VERTICES.size());
+    // 2. Index Buffer
+    VkBufferCreateInfo ib_info{
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = sizeof(uint16_t) * CUBE_INDICES.size(),
+        .usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+    };
+
+    VmaAllocationInfo ib_alloc_info{};
+    if (vmaCreateBuffer(vk.allocator, &ib_info, &alloc_info, &vk.index_buffer.buffer, &vk.index_buffer.allocation, &ib_alloc_info) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create 3D cube index buffer with VMA");
+    }
+    std::memcpy(ib_alloc_info.pMappedData, CUBE_INDICES.data(), sizeof(uint16_t) * CUBE_INDICES.size());
+
+    std::println("Created shared 3D cube mesh ({} vertices, {} indices)", CUBE_VERTICES.size(), CUBE_INDICES.size());
 }
 
 uint32_t get_vk_format_size(VkFormat format) {
@@ -859,7 +1415,7 @@ CompiledShadersWithReflection compile_slang_shader_source(const char* source) {
 
     Slang::ComPtr<slang::IBlob> diagnostic_blob;
     Slang::ComPtr<slang::IModule> module(
-        session->loadModuleFromSourceString("triangle_shader", "triangle.slang", source, diagnostic_blob.writeRef()));
+        session->loadModuleFromSourceString("cube_shader", "cube.slang", source, diagnostic_blob.writeRef()));
 
     if (!module) {
         std::string err = diagnostic_blob ? static_cast<const char*>(diagnostic_blob->getBufferPointer()) : "Unknown Slang error";
@@ -897,7 +1453,7 @@ CompiledShadersWithReflection compile_slang_shader_source(const char* source) {
 
     auto layout = linked_program->getLayout();
 
-    // 1. Reflect Vertex Input from Vertex Shader Entry Point
+    // Reflect Vertex Input
     auto vs_layout = layout->findEntryPointByName("vsMain");
     if (vs_layout && vs_layout->getParameterCount() > 0) {
         auto param = vs_layout->getParameterByIndex(0);
@@ -917,10 +1473,6 @@ CompiledShadersWithReflection compile_slang_shader_source(const char* source) {
                 .offset = current_offset,
             });
 
-            std::println("  [Slang Reflection] Vertex Attribute {}: semantic='{}', location={}, offset={}, format={}",
-                f, field->getSemanticName() ? field->getSemanticName() : field->getName(),
-                location, current_offset, static_cast<int>(format));
-
             current_offset += size;
         }
 
@@ -929,10 +1481,9 @@ CompiledShadersWithReflection compile_slang_shader_source(const char* source) {
             .stride = current_offset,
             .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
         };
-        std::println("  [Slang Reflection] Vertex Input Stride: {} bytes", current_offset);
     }
 
-    // 2. Reflect Push Constants and Global Parameters
+    // Reflect Push Constants
     for (unsigned i = 0; i < layout->getParameterCount(); ++i) {
         auto param = layout->getParameterByIndex(i);
         if (param->getCategory() == slang::ParameterCategory::PushConstantBuffer) {
@@ -951,15 +1502,8 @@ CompiledShadersWithReflection compile_slang_shader_source(const char* source) {
                 .offset = 0,
                 .size = size,
             });
-
-            std::println("  [Slang Reflection] Push Constant Range: name='{}', size={} bytes",
-                param->getName(), size);
         }
     }
-
-    std::println("Slang compiled shaders at runtime: VS {} bytes, FS {} bytes",
-        result.vs_spirv.size() * sizeof(uint32_t),
-        result.fs_spirv.size() * sizeof(uint32_t));
 
     return result;
 }
@@ -977,8 +1521,8 @@ VkShaderModule create_shader_module(VkDevice device, const std::vector<uint32_t>
     return module;
 }
 
-void create_graphics_pipeline(VulkanState& vk) {
-    auto compiled_shaders = compile_slang_shader_source(TRIANGLE_SLANG_CODE);
+void create_shared_graphics_pipeline(VulkanContext& vk) {
+    auto compiled_shaders = compile_slang_shader_source(CUBE_SLANG_CODE);
     VkShaderModule vs_module = create_shader_module(vk.device, compiled_shaders.vs_spirv);
     VkShaderModule fs_module = create_shader_module(vk.device, compiled_shaders.fs_spirv);
 
@@ -997,7 +1541,6 @@ void create_graphics_pipeline(VulkanState& vk) {
         },
     };
 
-    // Automated Vertex Input from Slang Reflection
     VkPipelineVertexInputStateCreateInfo vertex_input_info{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
         .vertexBindingDescriptionCount = 1,
@@ -1023,7 +1566,7 @@ void create_graphics_pipeline(VulkanState& vk) {
         .depthClampEnable = VK_FALSE,
         .rasterizerDiscardEnable = VK_FALSE,
         .polygonMode = VK_POLYGON_MODE_FILL,
-        .cullMode = VK_CULL_MODE_NONE,
+        .cullMode = VK_CULL_MODE_BACK_BIT,
         .frontFace = VK_FRONT_FACE_CLOCKWISE,
         .lineWidth = 1.0f,
     };
@@ -1032,6 +1575,15 @@ void create_graphics_pipeline(VulkanState& vk) {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
         .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
         .sampleShadingEnable = VK_FALSE,
+    };
+
+    VkPipelineDepthStencilStateCreateInfo depth_stencil{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthTestEnable = VK_TRUE,
+        .depthWriteEnable = VK_TRUE,
+        .depthCompareOp = VK_COMPARE_OP_LESS,
+        .depthBoundsTestEnable = VK_FALSE,
+        .stencilTestEnable = VK_FALSE,
     };
 
     VkPipelineColorBlendAttachmentState color_blend_attachment{
@@ -1057,7 +1609,6 @@ void create_graphics_pipeline(VulkanState& vk) {
         .pDynamicStates = dynamic_states,
     };
 
-    // Automated Pipeline Layout from Slang Reflection
     const auto& push_constants = compiled_shaders.pipeline_layout_data.push_constants;
     VkPipelineLayoutCreateInfo pipeline_layout_info{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -1070,10 +1621,12 @@ void create_graphics_pipeline(VulkanState& vk) {
     }
 
     VkFormat color_format = VK_FORMAT_B8G8R8A8_UNORM;
+    VkFormat depth_format = DEPTH_FORMAT;
     VkPipelineRenderingCreateInfo pipeline_rendering_info{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
         .colorAttachmentCount = 1,
         .pColorAttachmentFormats = &color_format,
+        .depthAttachmentFormat = depth_format,
     };
 
     VkGraphicsPipelineCreateInfo pipeline_info{
@@ -1086,6 +1639,7 @@ void create_graphics_pipeline(VulkanState& vk) {
         .pViewportState = &viewport_state,
         .pRasterizationState = &rasterizer,
         .pMultisampleState = &multisampling,
+        .pDepthStencilState = &depth_stencil,
         .pColorBlendState = &color_blending,
         .pDynamicState = &dynamic_state,
         .layout = vk.pipeline_layout,
@@ -1093,304 +1647,15 @@ void create_graphics_pipeline(VulkanState& vk) {
     };
 
     if (vkCreateGraphicsPipelines(vk.device, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &vk.pipeline) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create graphics pipeline for dynamic rendering");
+        throw std::runtime_error("Failed to create graphics pipeline for 3D dynamic rendering");
     }
 
     vkDestroyShaderModule(vk.device, fs_module, nullptr);
     vkDestroyShaderModule(vk.device, vs_module, nullptr);
-    std::println("Graphics pipeline created via Slang Reflection automation.");
+    std::println("Shared 3D graphics pipeline created via Slang Reflection.");
 }
 
-void create_command_resources(VulkanState& vk) {
-    VkCommandPoolCreateInfo pool_info{
-        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-        .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
-        .queueFamilyIndex = vk.queue_family_index,
-    };
-
-    if (vkCreateCommandPool(vk.device, &pool_info, nullptr, &vk.command_pool) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create Vulkan command pool");
-    }
-
-    vk.command_buffers.resize(BUFFER_POOL_SIZE);
-    VkCommandBufferAllocateInfo alloc_info{
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-        .commandPool = vk.command_pool,
-        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-        .commandBufferCount = static_cast<uint32_t>(BUFFER_POOL_SIZE),
-    };
-
-    if (vkAllocateCommandBuffers(vk.device, &alloc_info, vk.command_buffers.data()) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to allocate command buffers");
-    }
-
-    vk.in_flight_fences.resize(BUFFER_POOL_SIZE);
-    VkFenceCreateInfo fence_info{
-        .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
-        .flags = VK_FENCE_CREATE_SIGNALED_BIT,
-    };
-    for (size_t i = 0; i < BUFFER_POOL_SIZE; ++i) {
-        if (vkCreateFence(vk.device, &fence_info, nullptr, &vk.in_flight_fences[i]) != VK_SUCCESS) {
-            throw std::runtime_error("Failed to create in-flight fence");
-        }
-    }
-
-    vk.render_complete_semaphores.resize(BUFFER_POOL_SIZE);
-    VkExportSemaphoreCreateInfo export_sem_info{
-        .sType = VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO,
-        .handleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT,
-    };
-    VkSemaphoreCreateInfo sem_info{
-        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
-        .pNext = &export_sem_info,
-    };
-    for (size_t i = 0; i < BUFFER_POOL_SIZE; ++i) {
-        if (vkCreateSemaphore(vk.device, &sem_info, nullptr, &vk.render_complete_semaphores[i]) != VK_SUCCESS) {
-            throw std::runtime_error("Failed to create persistent exportable semaphore");
-        }
-    }
-}
-
-void timeline_attach_sync_fd(int drm_fd, DrmTimeline& timeline, int sync_fd) {
-    uint32_t temp_obj = 0;
-    if (drmSyncobjCreate(drm_fd, 0, &temp_obj) != 0) {
-        close(sync_fd);
-        throw std::runtime_error("Failed to create temporary syncobj");
-    }
-
-    if (drmSyncobjImportSyncFile(drm_fd, temp_obj, sync_fd) != 0) {
-        drmSyncobjDestroy(drm_fd, temp_obj);
-        close(sync_fd);
-        throw std::runtime_error("Failed to import sync file into DRM syncobj");
-    }
-
-    if (drmSyncobjTransfer(drm_fd, timeline.handle, timeline.point + 1, temp_obj, 0, 0) != 0) {
-        drmSyncobjDestroy(drm_fd, temp_obj);
-        close(sync_fd);
-        throw std::runtime_error("Failed to transfer DRM syncobj to timeline point");
-    }
-
-    timeline.point++;
-    drmSyncobjDestroy(drm_fd, temp_obj);
-    close(sync_fd);
-}
-
-void render_frame(WaylandState& wl, VulkanState& vk, std::chrono::steady_clock::time_point start_time) {
-    if (wl.need_resize) {
-        wl.need_resize = false;
-        recreate_buffers(wl, vk);
-    }
-
-    auto& buf = vk.buffers[vk.current_buffer_idx];
-
-    // Explicit sync: Wait for the compositor to release this specific buffer before rendering to it again
-    if (buf.last_release_point > 0) {
-        uint32_t release_handle = vk.release_timeline.handle;
-        uint64_t release_point = buf.last_release_point;
-        drmSyncobjTimelineWait(vk.drm_fd, &release_handle, &release_point, 1, 1000000000ULL, DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT, nullptr);
-    }
-
-    vkWaitForFences(vk.device, 1, &vk.in_flight_fences[vk.current_buffer_idx], VK_TRUE, UINT64_MAX);
-    vkResetFences(vk.device, 1, &vk.in_flight_fences[vk.current_buffer_idx]);
-
-    auto cmd = vk.command_buffers[vk.current_buffer_idx];
-    vkResetCommandBuffer(cmd, 0);
-
-    VkCommandBufferBeginInfo begin_info{
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-    };
-    vkBeginCommandBuffer(cmd, &begin_info);
-
-    auto now = std::chrono::steady_clock::now();
-    float time_sec = std::chrono::duration<float>(now - start_time).count();
-    VkClearColorValue clear_color = {
-        .float32 = {
-            0.1f + 0.05f * std::sin(time_sec),
-            0.1f + 0.05f * std::sin(time_sec + 2.0f),
-            0.15f + 0.05f * std::sin(time_sec + 4.0f),
-            1.0f
-        }
-    };
-
-    VkImageSubresourceRange subresource_range{
-        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-        .baseMipLevel = 0,
-        .levelCount = 1,
-        .baseArrayLayer = 0,
-        .layerCount = 1,
-    };
-
-    // Synchronization 2: Transition from UNDEFINED to COLOR_ATTACHMENT_OPTIMAL
-    VkImageMemoryBarrier2 barrier_to_attachment{
-        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-        .srcStageMask = VK_PIPELINE_STAGE_2_NONE,
-        .srcAccessMask = VK_ACCESS_2_NONE,
-        .dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-        .dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-        .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .image = buf.image,
-        .subresourceRange = subresource_range,
-    };
-
-    VkDependencyInfo dep_to_attachment{
-        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-        .imageMemoryBarrierCount = 1,
-        .pImageMemoryBarriers = &barrier_to_attachment,
-    };
-
-    vkCmdPipelineBarrier2(cmd, &dep_to_attachment);
-
-    // Dynamic Rendering: vkCmdBeginRendering / vkCmdEndRendering with color attachment
-    VkRenderingAttachmentInfo color_attachment{
-        .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        .imageView = buf.view,
-        .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-        .clearValue = {
-            .color = clear_color,
-        },
-    };
-
-    VkRenderingInfo rendering_info{
-        .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
-        .renderArea = {
-            .offset = {0, 0},
-            .extent = {wl.width, wl.height},
-        },
-        .layerCount = 1,
-        .colorAttachmentCount = 1,
-        .pColorAttachments = &color_attachment,
-    };
-
-    vkCmdBeginRendering(cmd, &rendering_info);
-
-    // Draw RGB Triangle with Reflected Push Constants
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.pipeline);
-
-    struct ShaderPushConstants {
-        float time;
-        float scale;
-        float aspect_ratio;
-        float _pad;
-    } pc = {
-        .time = time_sec,
-        .scale = 0.8f + 0.15f * std::sin(time_sec * 2.0f),
-        .aspect_ratio = (wl.height > 0) ? (static_cast<float>(wl.width) / static_cast<float>(wl.height)) : 1.0f,
-        ._pad = 0.0f,
-    };
-
-    vkCmdPushConstants(
-        cmd,
-        vk.pipeline_layout,
-        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-        0,
-        sizeof(ShaderPushConstants),
-        &pc);
-
-    VkViewport viewport{
-        .x = 0.0f,
-        .y = 0.0f,
-        .width = static_cast<float>(wl.width),
-        .height = static_cast<float>(wl.height),
-        .minDepth = 0.0f,
-        .maxDepth = 1.0f,
-    };
-    vkCmdSetViewport(cmd, 0, 1, &viewport);
-
-    VkRect2D scissor{
-        .offset = {0, 0},
-        .extent = {wl.width, wl.height},
-    };
-    vkCmdSetScissor(cmd, 0, 1, &scissor);
-
-    VkDeviceSize offsets[] = {0};
-    vkCmdBindVertexBuffers(cmd, 0, 1, &vk.vertex_buffer.buffer, offsets);
-
-    vkCmdDraw(cmd, static_cast<uint32_t>(TRIANGLE_VERTICES.size()), 1, 0, 0);
-
-    vkCmdEndRendering(cmd);
-
-    // Synchronization 2: Transition from COLOR_ATTACHMENT_OPTIMAL to GENERAL
-    VkImageMemoryBarrier2 barrier_to_general{
-        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-        .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-        .srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-        .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-        .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT,
-        .oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
-        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .image = buf.image,
-        .subresourceRange = subresource_range,
-    };
-
-    VkDependencyInfo dep_to_general{
-        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-        .imageMemoryBarrierCount = 1,
-        .pImageMemoryBarriers = &barrier_to_general,
-    };
-
-    vkCmdPipelineBarrier2(cmd, &dep_to_general);
-
-    vkEndCommandBuffer(cmd);
-
-    VkSubmitInfo submit_info{
-        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-        .commandBufferCount = 1,
-        .pCommandBuffers = &cmd,
-        .signalSemaphoreCount = 1,
-        .pSignalSemaphores = &vk.render_complete_semaphores[vk.current_buffer_idx],
-    };
-
-    if (vkQueueSubmit(vk.queue, 1, &submit_info, vk.in_flight_fences[vk.current_buffer_idx]) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to submit draw command buffer");
-    }
-
-    // Export sync_file from Vulkan semaphore
-    VkSemaphoreGetFdInfoKHR get_sem_fd_info{
-        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR,
-        .semaphore = vk.render_complete_semaphores[vk.current_buffer_idx],
-        .handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT,
-    };
-
-    int sync_file_fd = -1;
-    if (vkGetSemaphoreFdKHR(vk.device, &get_sem_fd_info, &sync_file_fd) != VK_SUCCESS || sync_file_fd < 0) {
-        throw std::runtime_error("Failed to export sync file fd from semaphore");
-    }
-
-    // Attach sync_file to DRM acquire timeline
-    timeline_attach_sync_fd(vk.drm_fd, vk.acquire_timeline, sync_file_fd);
-
-    // Advance release timeline point for this buffer
-    vk.release_timeline.point++;
-    buf.last_release_point = vk.release_timeline.point;
-
-    // Set explicit sync points on Wayland surface
-    wp_linux_drm_syncobj_surface_v1_set_acquire_point(
-        wl.syncobj_surface,
-        vk.acquire_timeline.wtimeline,
-        vk.acquire_timeline.point >> 32,
-        vk.acquire_timeline.point & 0xffffffff);
-
-    wp_linux_drm_syncobj_surface_v1_set_release_point(
-        wl.syncobj_surface,
-        vk.release_timeline.wtimeline,
-        vk.release_timeline.point >> 32,
-        vk.release_timeline.point & 0xffffffff);
-
-    wl_surface_attach(wl.surface, buf.wbuffer, 0, 0);
-    wl_surface_damage_buffer(wl.surface, 0, 0, wl.width, wl.height);
-    wl_surface_commit(wl.surface);
-
-    vk.current_buffer_idx = (vk.current_buffer_idx + 1) % BUFFER_POOL_SIZE;
-}
-
-void cleanup_vulkan(VulkanState& vk) {
+void cleanup_vulkan_context(VulkanContext& vk) {
     if (vk.device != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(vk.device);
 
@@ -1404,45 +1669,16 @@ void cleanup_vulkan(VulkanState& vk) {
             vk.pipeline_layout = VK_NULL_HANDLE;
         }
 
+        if (vk.index_buffer.buffer != VK_NULL_HANDLE) {
+            vmaDestroyBuffer(vk.allocator, vk.index_buffer.buffer, vk.index_buffer.allocation);
+            vk.index_buffer.buffer = VK_NULL_HANDLE;
+            vk.index_buffer.allocation = VK_NULL_HANDLE;
+        }
+
         if (vk.vertex_buffer.buffer != VK_NULL_HANDLE) {
             vmaDestroyBuffer(vk.allocator, vk.vertex_buffer.buffer, vk.vertex_buffer.allocation);
             vk.vertex_buffer.buffer = VK_NULL_HANDLE;
             vk.vertex_buffer.allocation = VK_NULL_HANDLE;
-        }
-
-        for (auto fence : vk.in_flight_fences) {
-            if (fence != VK_NULL_HANDLE) vkDestroyFence(vk.device, fence, nullptr);
-        }
-        vk.in_flight_fences.clear();
-
-        for (auto sem : vk.render_complete_semaphores) {
-            if (sem != VK_NULL_HANDLE) vkDestroySemaphore(vk.device, sem, nullptr);
-        }
-        vk.render_complete_semaphores.clear();
-
-        if (vk.command_pool != VK_NULL_HANDLE) {
-            vkDestroyCommandPool(vk.device, vk.command_pool, nullptr);
-            vk.command_pool = VK_NULL_HANDLE;
-        }
-
-        cleanup_dmabuf_buffers(vk);
-
-        if (vk.acquire_timeline.wtimeline) {
-            wp_linux_drm_syncobj_timeline_v1_destroy(vk.acquire_timeline.wtimeline);
-            vk.acquire_timeline.wtimeline = nullptr;
-        }
-        if (vk.acquire_timeline.handle != 0) {
-            drmSyncobjDestroy(vk.drm_fd, vk.acquire_timeline.handle);
-            vk.acquire_timeline.handle = 0;
-        }
-
-        if (vk.release_timeline.wtimeline) {
-            wp_linux_drm_syncobj_timeline_v1_destroy(vk.release_timeline.wtimeline);
-            vk.release_timeline.wtimeline = nullptr;
-        }
-        if (vk.release_timeline.handle != 0) {
-            drmSyncobjDestroy(vk.drm_fd, vk.release_timeline.handle);
-            vk.release_timeline.handle = 0;
         }
 
         if (vk.drm_fd >= 0) {
@@ -1476,27 +1712,36 @@ int main() {
     std::signal(SIGTERM, signal_handler);
 
     try {
-        std::println("Starting Vulkan Slang Triangle Wayland application (C++26)...");
+        std::println("Starting Vulkan 3D Cube Multi-Window Wayland Application (C++26)...");
 
-        WaylandState wl{};
-        init_wayland(wl);
+        WaylandContext wl{};
+        init_wayland_context(wl);
 
-        VulkanState vk{};
-        init_vulkan_instance(vk);
-        select_physical_device_and_queue(vk);
-        create_logical_device(vk);
-        create_vma_allocator(vk);
-        init_drm_syncobj_timelines(wl, vk);
-        create_dmabuf_buffers(wl, vk);
-        create_vertex_buffer(vk);
-        create_graphics_pipeline(vk);
-        create_command_resources(vk);
+        VulkanContext vk{};
+        init_vulkan_context(vk);
+        create_shared_mesh_buffers(vk);
+        create_shared_graphics_pipeline(vk);
 
-        std::println("Initialization successful. Entering render loop...");
+        // Spawn 3 independent 3D rotating cube windows
+        std::vector<std::unique_ptr<AppWindow>> windows;
+
+        // Window 1: 800x600, fast rotating cube with vibrant cyan/blue tint
+        windows.push_back(std::make_unique<AppWindow>(
+            wl, vk, "Window 1 (3D Cube - Cyan/Blue)", 800, 600, 1.4f, glm::vec3(0.5f, 1.0f, 1.0f)));
+
+        // Window 2: 600x600, reverse rotating cube with warm golden/orange tint
+        windows.push_back(std::make_unique<AppWindow>(
+            wl, vk, "Window 2 (3D Cube - Gold/Orange)", 600, 600, -1.0f, glm::vec3(1.0f, 0.75f, 0.3f)));
+
+        // Window 3: 500x500, slow rotating cube with magenta/purple tint
+        windows.push_back(std::make_unique<AppWindow>(
+            wl, vk, "Window 3 (3D Cube - Magenta/Purple)", 500, 500, 0.7f, glm::vec3(1.0f, 0.4f, 1.0f)));
+
+        std::println("Created {} independent 3D Wayland windows. Entering main event loop...", windows.size());
         std::fflush(stdout);
         auto start_time = std::chrono::steady_clock::now();
 
-        while (wl.running && !g_interrupted.load()) {
+        while (!windows.empty() && !g_interrupted.load()) {
             while (wl_display_prepare_read(wl.display) != 0) {
                 wl_display_dispatch_pending(wl.display);
             }
@@ -1508,8 +1753,7 @@ int main() {
                 .revents = 0,
             };
 
-            int timeout_ms = wl.configured ? 0 : 50;
-            int ret = poll(&pfd, 1, timeout_ms);
+            int ret = poll(&pfd, 1, 10);
             if (ret > 0) {
                 wl_display_read_events(wl.display);
                 wl_display_dispatch_pending(wl.display);
@@ -1517,18 +1761,36 @@ int main() {
                 wl_display_cancel_read(wl.display);
             }
 
-            if (!wl.running || g_interrupted.load()) {
+            if (g_interrupted.load()) {
                 break;
             }
 
-            if (wl.configured) {
-                render_frame(wl, vk, start_time);
+            // Render each active window independently
+            for (auto& win : windows) {
+                if (win->is_open() && win->is_configured()) {
+                    win->render_frame(wl, vk, start_time);
+                }
+            }
+
+            // Clean up and remove closed windows dynamically
+            for (auto it = windows.begin(); it != windows.end();) {
+                if (!(*it)->is_open()) {
+                    (*it)->cleanup(vk);
+                    it = windows.erase(it);
+                } else {
+                    ++it;
+                }
             }
         }
 
-        std::println("Shutting down...");
-        cleanup_vulkan(vk);
-        cleanup_wayland(wl);
+        std::println("Shutting down windows and context...");
+        for (auto& win : windows) {
+            win->cleanup(vk);
+        }
+        windows.clear();
+
+        cleanup_vulkan_context(vk);
+        cleanup_wayland_context(wl);
         std::println("Goodbye!");
 
     } catch (const std::exception& e) {
