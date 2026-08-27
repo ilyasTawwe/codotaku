@@ -42,6 +42,8 @@ namespace {
 
 constexpr size_t BUFFER_POOL_SIZE = 3;
 constexpr VkFormat DEPTH_FORMAT = VK_FORMAT_D32_SFLOAT;
+constexpr VkDeviceSize GEOMETRY_ARENA_SIZE = 4 * 1024 * 1024; // 4 MB Static Geometry Arena
+constexpr VkDeviceSize FRAME_ARENA_SIZE = 64 * 1024;         // 64 KB Dynamic Frame Arena per window
 
 std::atomic<bool> g_interrupted{false};
 
@@ -202,11 +204,98 @@ struct DepthBuffer {
     VmaAllocation allocation{VK_NULL_HANDLE};
 };
 
-struct BufferResource {
+struct GpuVirtualSuballocation {
+    VmaVirtualAllocation handle{VK_NULL_HANDLE};
+    VkDeviceSize offset{0};
+    VkDeviceSize size{0};
+    VkDeviceAddress device_address{0};
+};
+
+struct GpuBufferArena {
     VkBuffer buffer{VK_NULL_HANDLE};
     VmaAllocation allocation{VK_NULL_HANDLE};
-    VkDeviceAddress device_address{0};
+    VmaVirtualBlock virtual_block{VK_NULL_HANDLE};
+    VkDeviceAddress base_address{0};
     void* mapped_data{nullptr};
+    VkDeviceSize total_size{0};
+
+    void init(VmaAllocator allocator, VkDevice device, VkDeviceSize size, VkBufferUsageFlags usage, VmaAllocationCreateFlags vma_flags) {
+        total_size = size;
+
+        VkBufferCreateInfo buffer_info{
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .size = size,
+            .usage = usage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        };
+
+        VmaAllocationCreateInfo alloc_info{
+            .flags = vma_flags,
+            .usage = VMA_MEMORY_USAGE_AUTO,
+        };
+
+        VmaAllocationInfo allocation_info{};
+        if (vmaCreateBuffer(allocator, &buffer_info, &alloc_info, &buffer, &allocation, &allocation_info) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to allocate GPU Buffer Arena via VMA");
+        }
+
+        mapped_data = allocation_info.pMappedData;
+
+        VkBufferDeviceAddressInfo address_info{
+            .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
+            .buffer = buffer,
+        };
+        base_address = vkGetBufferDeviceAddress(device, &address_info);
+
+        VmaVirtualBlockCreateInfo block_info{
+            .size = size,
+        };
+        if (vmaCreateVirtualBlock(&block_info, &virtual_block) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create VMA Virtual Block for GPU Buffer Arena");
+        }
+    }
+
+    GpuVirtualSuballocation suballocate(VkDeviceSize req_size, VkDeviceSize alignment = 16) {
+        VmaVirtualAllocationCreateInfo alloc_info{
+            .size = req_size,
+            .alignment = alignment,
+        };
+        GpuVirtualSuballocation sub{};
+        sub.size = req_size;
+        if (vmaVirtualAllocate(virtual_block, &alloc_info, &sub.handle, &sub.offset) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to suballocate memory chunk from GPU Buffer Arena via VmaVirtualBlock");
+        }
+        sub.device_address = base_address + sub.offset;
+        return sub;
+    }
+
+    void free_suballocation(GpuVirtualSuballocation& sub) {
+        if (sub.handle != VK_NULL_HANDLE) {
+            vmaVirtualFree(virtual_block, sub.handle);
+            sub.handle = VK_NULL_HANDLE;
+        }
+    }
+
+    void reset() {
+        if (virtual_block != VK_NULL_HANDLE) {
+            vmaClearVirtualBlock(virtual_block);
+        }
+    }
+
+    void cleanup(VmaAllocator allocator) {
+        if (virtual_block != VK_NULL_HANDLE) {
+            vmaClearVirtualBlock(virtual_block);
+            vmaDestroyVirtualBlock(virtual_block);
+            virtual_block = VK_NULL_HANDLE;
+        }
+        if (buffer != VK_NULL_HANDLE) {
+            vmaDestroyBuffer(allocator, buffer, allocation);
+            buffer = VK_NULL_HANDLE;
+            allocation = VK_NULL_HANDLE;
+        }
+        mapped_data = nullptr;
+        base_address = 0;
+    }
 };
 
 struct VulkanContext {
@@ -221,19 +310,13 @@ struct VulkanContext {
     VmaAllocator allocator{VK_NULL_HANDLE};
     int drm_fd{-1};
 
-    BufferResource vertex_buffer{};
-    BufferResource index_buffer{};
+    GpuBufferArena geometry_arena{};
+    GpuVirtualSuballocation vertex_suballoc{};
+    GpuVirtualSuballocation index_suballoc{};
+
     VkPipelineLayout pipeline_layout{VK_NULL_HANDLE};
     VkPipeline pipeline{VK_NULL_HANDLE};
 };
-
-VkDeviceAddress get_buffer_address(VkDevice device, VkBuffer buffer) {
-    VkBufferDeviceAddressInfo info{
-        .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
-        .buffer = buffer,
-    };
-    return vkGetBufferDeviceAddress(device, &info);
-}
 
 uint32_t find_memory_type(const VkPhysicalDeviceMemoryProperties& mem_props, uint32_t type_filter, VkMemoryPropertyFlags properties) {
     for (uint32_t i = 0; i < mem_props.memoryTypeCount; ++i) {
@@ -281,7 +364,7 @@ public:
         init_drm_syncobj_timelines(wl, vk);
         create_dmabuf_buffers(wl, vk);
         create_depth_buffer(vk);
-        create_scene_buffers(vk);
+        init_frame_arena(vk);
         create_command_resources(vk);
     }
 
@@ -306,7 +389,7 @@ public:
                 m_command_pool = VK_NULL_HANDLE;
             }
 
-            cleanup_scene_buffers(vk);
+            m_frame_arena.cleanup(vk.allocator);
             cleanup_depth_buffer(vk);
             cleanup_dmabuf_buffers(vk);
 
@@ -520,22 +603,23 @@ public:
 
         glm::mat4 mvp = proj * view * model;
 
-        // 1. Update Mapped SceneData Root Buffer
+        // 1. Suballocate SceneData in Dynamic Frame Arena via VMA Virtual Allocator
+        VkDeviceSize scene_offset = m_current_buffer_idx * 256; // Ring offset within Dynamic Frame Arena
         SceneData scene_data{
             .mvp = mvp,
             .model = model,
             .tint = m_tint,
             ._pad = 0.0f,
-            .vertexBufferAddress = vk.vertex_buffer.device_address,
-            .indexBufferAddress = vk.index_buffer.device_address,
+            .vertexBufferAddress = vk.vertex_suballoc.device_address,
+            .indexBufferAddress = vk.index_suballoc.device_address,
         };
-        std::memcpy(m_scene_buffers[m_current_buffer_idx].mapped_data, &scene_data, sizeof(SceneData));
+        std::memcpy(static_cast<uint8_t*>(m_frame_arena.mapped_data) + scene_offset, &scene_data, sizeof(SceneData));
 
-        // 2. Push only 8-byte 64-bit Root Buffer GPU address!
+        // 2. Push 8-byte 64-bit GPU pointer into push constants
         struct ShaderPushConstants {
             uint64_t sceneDataAddress;
         } pc = {
-            .sceneDataAddress = m_scene_buffers[m_current_buffer_idx].device_address,
+            .sceneDataAddress = m_frame_arena.base_address + scene_offset,
         };
 
         vkCmdPushConstants(
@@ -562,7 +646,7 @@ public:
         };
         vkCmdSetScissor(cmd, 0, 1, &scissor);
 
-        // 3. 100% Bindless Draw! (Vertices and indices are pulled directly in shader via BDA)
+        // 3. 100% Bindless Draw (pulls vertices & indices from Static Geometry Arena)
         vkCmdDraw(cmd, static_cast<uint32_t>(CUBE_INDICES.size()), 1, 0, 0);
 
         vkCmdEndRendering(cmd);
@@ -650,8 +734,7 @@ private:
     void cleanup_dmabuf_buffers(VulkanContext& vk);
     void create_depth_buffer(VulkanContext& vk);
     void cleanup_depth_buffer(VulkanContext& vk);
-    void create_scene_buffers(VulkanContext& vk);
-    void cleanup_scene_buffers(VulkanContext& vk);
+    void init_frame_arena(VulkanContext& vk);
     void recreate_buffers(WaylandContext& wl, VulkanContext& vk);
     void create_command_resources(VulkanContext& vk);
 
@@ -676,7 +759,7 @@ private:
 
     std::vector<DmaBufBuffer> m_buffers;
     DepthBuffer m_depth{};
-    std::vector<BufferResource> m_scene_buffers;
+    GpuBufferArena m_frame_arena{};
     size_t m_current_buffer_idx{0};
 
     VkCommandPool m_command_pool{VK_NULL_HANDLE};
@@ -1069,39 +1152,13 @@ void AppWindow::cleanup_depth_buffer(VulkanContext& vk) {
     }
 }
 
-void AppWindow::create_scene_buffers(VulkanContext& vk) {
-    m_scene_buffers.resize(BUFFER_POOL_SIZE);
-    VkBufferCreateInfo buffer_info{
-        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .size = sizeof(SceneData),
-        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-    };
-
-    VmaAllocationCreateInfo alloc_info{
-        .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT,
-        .usage = VMA_MEMORY_USAGE_AUTO,
-    };
-
-    for (size_t i = 0; i < BUFFER_POOL_SIZE; ++i) {
-        VmaAllocationInfo allocation_info{};
-        if (vmaCreateBuffer(vk.allocator, &buffer_info, &alloc_info, &m_scene_buffers[i].buffer, &m_scene_buffers[i].allocation, &allocation_info) != VK_SUCCESS) {
-            throw std::runtime_error("Failed to allocate SceneData root buffer via VMA");
-        }
-        m_scene_buffers[i].mapped_data = allocation_info.pMappedData;
-        m_scene_buffers[i].device_address = get_buffer_address(vk.device, m_scene_buffers[i].buffer);
-    }
-}
-
-void AppWindow::cleanup_scene_buffers(VulkanContext& vk) {
-    for (auto& buf : m_scene_buffers) {
-        if (buf.buffer != VK_NULL_HANDLE) {
-            vmaDestroyBuffer(vk.allocator, buf.buffer, buf.allocation);
-            buf.buffer = VK_NULL_HANDLE;
-            buf.allocation = VK_NULL_HANDLE;
-        }
-    }
-    m_scene_buffers.clear();
+void AppWindow::init_frame_arena(VulkanContext& vk) {
+    m_frame_arena.init(
+        vk.allocator,
+        vk.device,
+        FRAME_ARENA_SIZE,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT);
 }
 
 void AppWindow::cleanup_dmabuf_buffers(VulkanContext& vk) {
@@ -1209,7 +1266,7 @@ void init_vulkan_context(VulkanContext& vk) {
 
     VkApplicationInfo app_info{
         .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
-        .pApplicationName = "Vulkan 3D Cube Multi-Window App (BDA Vertex Pulling)",
+        .pApplicationName = "Vulkan 3D Cube Multi-Window App (2-Buffer Arena + BDA)",
         .applicationVersion = VK_MAKE_VERSION(1, 0, 0),
         .pEngineName = "No Engine",
         .engineVersion = VK_MAKE_VERSION(1, 0, 0),
@@ -1402,44 +1459,35 @@ void init_vulkan_context(VulkanContext& vk) {
     }
 }
 
-void create_shared_mesh_buffers(VulkanContext& vk) {
-    // 1. Vertex Buffer (Storage Buffer with BDA)
-    VkBufferCreateInfo vb_info{
-        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .size = sizeof(Vertex) * CUBE_VERTICES.size(),
-        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-    };
+void create_shared_geometry_arena(VulkanContext& vk) {
+    // Allocate the unified Static Geometry Arena (4 MB)
+    vk.geometry_arena.init(
+        vk.allocator,
+        vk.device,
+        GEOMETRY_ARENA_SIZE,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT);
 
-    VmaAllocationCreateInfo alloc_info{
-        .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT,
-        .usage = VMA_MEMORY_USAGE_AUTO,
-    };
+    // Suballocate Vertices inside Geometry Arena
+    VkDeviceSize vb_size = sizeof(Vertex) * CUBE_VERTICES.size();
+    vk.vertex_suballoc = vk.geometry_arena.suballocate(vb_size, 64);
+    std::memcpy(
+        static_cast<uint8_t*>(vk.geometry_arena.mapped_data) + vk.vertex_suballoc.offset,
+        CUBE_VERTICES.data(),
+        vb_size);
 
-    VmaAllocationInfo vb_alloc_info{};
-    if (vmaCreateBuffer(vk.allocator, &vb_info, &alloc_info, &vk.vertex_buffer.buffer, &vk.vertex_buffer.allocation, &vb_alloc_info) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create 3D cube vertex buffer with VMA");
-    }
-    std::memcpy(vb_alloc_info.pMappedData, CUBE_VERTICES.data(), sizeof(Vertex) * CUBE_VERTICES.size());
-    vk.vertex_buffer.device_address = get_buffer_address(vk.device, vk.vertex_buffer.buffer);
+    // Suballocate Indices inside Geometry Arena
+    VkDeviceSize ib_size = sizeof(uint16_t) * CUBE_INDICES.size();
+    vk.index_suballoc = vk.geometry_arena.suballocate(ib_size, 64);
+    std::memcpy(
+        static_cast<uint8_t*>(vk.geometry_arena.mapped_data) + vk.index_suballoc.offset,
+        CUBE_INDICES.data(),
+        ib_size);
 
-    // 2. Index Buffer (Storage Buffer with BDA)
-    VkBufferCreateInfo ib_info{
-        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .size = sizeof(uint16_t) * CUBE_INDICES.size(),
-        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-    };
-
-    VmaAllocationInfo ib_alloc_info{};
-    if (vmaCreateBuffer(vk.allocator, &ib_info, &alloc_info, &vk.index_buffer.buffer, &vk.index_buffer.allocation, &ib_alloc_info) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create 3D cube index buffer with VMA");
-    }
-    std::memcpy(ib_alloc_info.pMappedData, CUBE_INDICES.data(), sizeof(uint16_t) * CUBE_INDICES.size());
-    vk.index_buffer.device_address = get_buffer_address(vk.device, vk.index_buffer.buffer);
-
-    std::println("Created shared 3D cube mesh (VB Address: {:#x}, IB Address: {:#x})",
-        vk.vertex_buffer.device_address, vk.index_buffer.device_address);
+    std::println("Static Geometry Arena ({} MB) initialized: VB offset={:#x} (BDA: {:#x}), IB offset={:#x} (BDA: {:#x})",
+        GEOMETRY_ARENA_SIZE / (1024 * 1024),
+        vk.vertex_suballoc.offset, vk.vertex_suballoc.device_address,
+        vk.index_suballoc.offset, vk.index_suballoc.device_address);
 }
 
 struct ReflectedPipelineLayoutData {
@@ -1695,17 +1743,7 @@ void cleanup_vulkan_context(VulkanContext& vk) {
             vk.pipeline_layout = VK_NULL_HANDLE;
         }
 
-        if (vk.index_buffer.buffer != VK_NULL_HANDLE) {
-            vmaDestroyBuffer(vk.allocator, vk.index_buffer.buffer, vk.index_buffer.allocation);
-            vk.index_buffer.buffer = VK_NULL_HANDLE;
-            vk.index_buffer.allocation = VK_NULL_HANDLE;
-        }
-
-        if (vk.vertex_buffer.buffer != VK_NULL_HANDLE) {
-            vmaDestroyBuffer(vk.allocator, vk.vertex_buffer.buffer, vk.vertex_buffer.allocation);
-            vk.vertex_buffer.buffer = VK_NULL_HANDLE;
-            vk.vertex_buffer.allocation = VK_NULL_HANDLE;
-        }
+        vk.geometry_arena.cleanup(vk.allocator);
 
         if (vk.drm_fd >= 0) {
             close(vk.drm_fd);
@@ -1738,14 +1776,14 @@ int main() {
     std::signal(SIGTERM, signal_handler);
 
     try {
-        std::println("Starting Vulkan 3D Cube Multi-Window App (Buffer Device Address Vertex Pulling)...");
+        std::println("Starting Vulkan 3D Cube Multi-Window App (2-Buffer Arena + BDA)...");
 
         WaylandContext wl{};
         init_wayland_context(wl);
 
         VulkanContext vk{};
         init_vulkan_context(vk);
-        create_shared_mesh_buffers(vk);
+        create_shared_geometry_arena(vk);
         create_shared_graphics_pipeline(vk);
 
         // Spawn 3 independent 3D rotating cube windows
@@ -1753,17 +1791,17 @@ int main() {
 
         // Window 1: 800x600, fast rotating cube with vibrant cyan/blue tint
         windows.push_back(std::make_unique<AppWindow>(
-            wl, vk, "Window 1 (3D BDA - Cyan)", 800, 600, 1.4f, glm::vec3(0.5f, 1.0f, 1.0f)));
+            wl, vk, "Window 1 (3D Arena BDA - Cyan)", 800, 600, 1.4f, glm::vec3(0.5f, 1.0f, 1.0f)));
 
         // Window 2: 600x600, reverse rotating cube with warm golden/orange tint
         windows.push_back(std::make_unique<AppWindow>(
-            wl, vk, "Window 2 (3D BDA - Gold)", 600, 600, -1.0f, glm::vec3(1.0f, 0.75f, 0.3f)));
+            wl, vk, "Window 2 (3D Arena BDA - Gold)", 600, 600, -1.0f, glm::vec3(1.0f, 0.75f, 0.3f)));
 
         // Window 3: 500x500, slow rotating cube with magenta/purple tint
         windows.push_back(std::make_unique<AppWindow>(
-            wl, vk, "Window 3 (3D BDA - Purple)", 500, 500, 0.7f, glm::vec3(1.0f, 0.4f, 1.0f)));
+            wl, vk, "Window 3 (3D Arena BDA - Purple)", 500, 500, 0.7f, glm::vec3(1.0f, 0.4f, 1.0f)));
 
-        std::println("Created {} independent 3D BDA Wayland windows. Entering main event loop...", windows.size());
+        std::println("Created {} independent 3D Arena BDA Wayland windows. Entering main event loop...", windows.size());
         std::fflush(stdout);
         auto start_time = std::chrono::steady_clock::now();
 
