@@ -9,6 +9,11 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(VulkanHeaders REQUIRED CONFIG)
 find_package(volk REQUIRED CONFIG)
 find_package(PkgConfig REQUIRED)
+find_package(glm REQUIRED CONFIG)
+
+# Slang compiler library and headers
+find_library(SLANG_COMPILER_LIBRARY NAMES slang-compiler REQUIRED)
+find_path(SLANG_INCLUDE_DIR NAMES slang.h PATH_SUFFIXES shader-slang REQUIRED)
 
 include(FetchContent)
 FetchContent_Declare(
@@ -104,6 +109,7 @@ add_executable(codotaku
 
 target_include_directories(codotaku PRIVATE
     "${CMAKE_CURRENT_BINARY_DIR}"
+    "${SLANG_INCLUDE_DIR}"
 )
 
 target_compile_definitions(codotaku PRIVATE
@@ -118,6 +124,8 @@ target_link_libraries(codotaku PRIVATE
     volk::volk_headers
     Vulkan::Headers
     GPUOpen::VulkanMemoryAllocator
+    glm::glm
+    "${SLANG_COMPILER_LIBRARY}"
     PkgConfig::WAYLAND
     PkgConfig::DRM
 )

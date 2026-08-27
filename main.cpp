@@ -18,6 +18,11 @@
 #include <drm/drm_fourcc.h>
 #include <xf86drm.h>
 
+#include <glm/glm.hpp>
+
+#include <slang.h>
+#include <slang-com-ptr.h>
+
 #include <volk.h>
 #define VMA_IMPLEMENTATION
 #include <vk_mem_alloc.h>
@@ -38,6 +43,42 @@ std::atomic<bool> g_interrupted{false};
 void signal_handler(int) {
     g_interrupted.store(true);
 }
+
+struct Vertex {
+    glm::vec2 pos;
+    glm::vec3 color;
+};
+
+const std::vector<Vertex> TRIANGLE_VERTICES = {
+    { {  0.0f, -0.6f }, { 1.0f, 0.0f, 0.0f } }, // Top (Red)
+    { {  0.6f,  0.6f }, { 0.0f, 1.0f, 0.0f } }, // Bottom Right (Green)
+    { { -0.6f,  0.6f }, { 0.0f, 0.0f, 1.0f } }, // Bottom Left (Blue)
+};
+
+const char* TRIANGLE_SLANG_CODE = R"(
+struct VertexInput {
+    float2 position : POSITION;
+    float3 color : COLOR;
+};
+
+struct VertexOutput {
+    float4 position : SV_Position;
+    float3 color : COLOR;
+};
+
+[shader("vertex")]
+VertexOutput vsMain(VertexInput input) {
+    VertexOutput output;
+    output.position = float4(input.position, 0.0, 1.0);
+    output.color = input.color;
+    return output;
+}
+
+[shader("fragment")]
+float4 fsMain(VertexOutput input) : SV_Target {
+    return float4(input.color, 1.0);
+}
+)";
 
 struct WaylandState {
     wl_display* display{nullptr};
@@ -76,6 +117,11 @@ struct DmaBufBuffer {
     uint64_t last_release_point{0};
 };
 
+struct VertexBufferResource {
+    VkBuffer buffer{VK_NULL_HANDLE};
+    VmaAllocation allocation{VK_NULL_HANDLE};
+};
+
 struct VulkanState {
     VkInstance instance{VK_NULL_HANDLE};
     VkDebugUtilsMessengerEXT debug_messenger{VK_NULL_HANDLE};
@@ -93,6 +139,10 @@ struct VulkanState {
 
     std::vector<DmaBufBuffer> buffers;
     size_t current_buffer_idx{0};
+
+    VertexBufferResource vertex_buffer{};
+    VkPipelineLayout pipeline_layout{VK_NULL_HANDLE};
+    VkPipeline pipeline{VK_NULL_HANDLE};
 
     VkCommandPool command_pool{VK_NULL_HANDLE};
     std::vector<VkCommandBuffer> command_buffers;
@@ -214,8 +264,8 @@ void init_wayland(WaylandState& wl) {
 
     wl.xdg_toplevel = xdg_surface_get_toplevel(wl.xdg_surface);
     xdg_toplevel_add_listener(wl.xdg_toplevel, &toplevel_listener, &wl);
-    xdg_toplevel_set_title(wl.xdg_toplevel, "Vulkan Dma-buf Explicit Sync (C++26)");
-    xdg_toplevel_set_app_id(wl.xdg_toplevel, "codotaku.vulkan.dmabuf");
+    xdg_toplevel_set_title(wl.xdg_toplevel, "Vulkan Dynamic Rendering Slang Triangle (C++26)");
+    xdg_toplevel_set_app_id(wl.xdg_toplevel, "codotaku.vulkan.triangle");
 
     wl.syncobj_surface = wp_linux_drm_syncobj_manager_v1_get_surface(wl.syncobj_mgr, wl.surface);
     if (!wl.syncobj_surface) {
@@ -259,7 +309,7 @@ void init_vulkan_instance(VulkanState& vk) {
 
     VkApplicationInfo app_info{
         .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
-        .pApplicationName = "Vulkan Dma-buf App",
+        .pApplicationName = "Vulkan Slang Dynamic Rendering Triangle",
         .applicationVersion = VK_MAKE_VERSION(1, 0, 0),
         .pEngineName = "No Engine",
         .engineVersion = VK_MAKE_VERSION(1, 0, 0),
@@ -401,7 +451,7 @@ void create_logical_device(VulkanState& vk) {
     };
 
     if (vkCreateDevice(vk.physical_device, &device_create_info, nullptr, &vk.device) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create Vulkan logical device with DMA-BUF & Explicit Sync extensions");
+        throw std::runtime_error("Failed to create Vulkan logical device with DMA-BUF, Dynamic Rendering & Explicit Sync");
     }
 
     volkLoadDevice(vk.device);
@@ -510,7 +560,7 @@ void create_dmabuf_buffers(WaylandState& wl, VulkanState& vk) {
             .arrayLayers = 1,
             .samples = VK_SAMPLE_COUNT_1_BIT,
             .tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT,
-            .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
             .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
             .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
         };
@@ -663,6 +713,249 @@ void recreate_buffers(WaylandState& wl, VulkanState& vk) {
     create_dmabuf_buffers(wl, vk);
 }
 
+void create_vertex_buffer(VulkanState& vk) {
+    VkBufferCreateInfo buffer_info{
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = sizeof(Vertex) * TRIANGLE_VERTICES.size(),
+        .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+    };
+
+    VmaAllocationCreateInfo alloc_info{
+        .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT,
+        .usage = VMA_MEMORY_USAGE_AUTO,
+    };
+
+    VmaAllocationInfo allocation_info{};
+    if (vmaCreateBuffer(vk.allocator, &buffer_info, &alloc_info, &vk.vertex_buffer.buffer, &vk.vertex_buffer.allocation, &allocation_info) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create triangle vertex buffer with VMA");
+    }
+
+    std::memcpy(allocation_info.pMappedData, TRIANGLE_VERTICES.data(), sizeof(Vertex) * TRIANGLE_VERTICES.size());
+    std::println("Created triangle vertex buffer via VMA ({} vertices)", TRIANGLE_VERTICES.size());
+}
+
+struct CompiledShaders {
+    std::vector<uint32_t> vs_spirv;
+    std::vector<uint32_t> fs_spirv;
+};
+
+CompiledShaders compile_slang_shader_source(const char* source) {
+    Slang::ComPtr<slang::IGlobalSession> global_session;
+    if (SLANG_FAILED(slang::createGlobalSession(global_session.writeRef()))) {
+        throw std::runtime_error("Failed to create Slang global session");
+    }
+
+    slang::SessionDesc session_desc = {};
+    slang::TargetDesc target_desc = {};
+    target_desc.format = SLANG_SPIRV;
+    target_desc.profile = global_session->findProfile("spirv_1_5");
+    session_desc.targets = &target_desc;
+    session_desc.targetCount = 1;
+
+    Slang::ComPtr<slang::ISession> session;
+    if (SLANG_FAILED(global_session->createSession(session_desc, session.writeRef()))) {
+        throw std::runtime_error("Failed to create Slang session");
+    }
+
+    Slang::ComPtr<slang::IBlob> diagnostic_blob;
+    Slang::ComPtr<slang::IModule> module(
+        session->loadModuleFromSourceString("triangle_shader", "triangle.slang", source, diagnostic_blob.writeRef()));
+
+    if (!module) {
+        std::string err = diagnostic_blob ? static_cast<const char*>(diagnostic_blob->getBufferPointer()) : "Unknown Slang error";
+        throw std::runtime_error("Slang compilation failed: " + err);
+    }
+
+    Slang::ComPtr<slang::IEntryPoint> vs_entry;
+    module->findEntryPointByName("vsMain", vs_entry.writeRef());
+
+    Slang::ComPtr<slang::IEntryPoint> fs_entry;
+    module->findEntryPointByName("fsMain", fs_entry.writeRef());
+
+    slang::IComponentType* components[] = { module.get(), vs_entry.get(), fs_entry.get() };
+    Slang::ComPtr<slang::IComponentType> program;
+    session->createCompositeComponentType(components, 3, program.writeRef(), diagnostic_blob.writeRef());
+
+    Slang::ComPtr<slang::IComponentType> linked_program;
+    program->link(linked_program.writeRef(), diagnostic_blob.writeRef());
+
+    Slang::ComPtr<slang::IBlob> vs_blob;
+    linked_program->getEntryPointCode(0, 0, vs_blob.writeRef(), diagnostic_blob.writeRef());
+
+    Slang::ComPtr<slang::IBlob> fs_blob;
+    linked_program->getEntryPointCode(1, 0, fs_blob.writeRef(), diagnostic_blob.writeRef());
+
+    CompiledShaders result{};
+    auto copy_blob = [](slang::IBlob* blob, std::vector<uint32_t>& out) {
+        size_t size_bytes = blob->getBufferSize();
+        out.resize(size_bytes / sizeof(uint32_t));
+        std::memcpy(out.data(), blob->getBufferPointer(), size_bytes);
+    };
+
+    copy_blob(vs_blob.get(), result.vs_spirv);
+    copy_blob(fs_blob.get(), result.fs_spirv);
+
+    std::println("Slang compiled shaders at runtime: VS {} bytes, FS {} bytes",
+        result.vs_spirv.size() * sizeof(uint32_t),
+        result.fs_spirv.size() * sizeof(uint32_t));
+
+    return result;
+}
+
+VkShaderModule create_shader_module(VkDevice device, const std::vector<uint32_t>& spirv) {
+    VkShaderModuleCreateInfo create_info{
+        .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+        .codeSize = spirv.size() * sizeof(uint32_t),
+        .pCode = spirv.data(),
+    };
+    VkShaderModule module{VK_NULL_HANDLE};
+    if (vkCreateShaderModule(device, &create_info, nullptr, &module) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create shader module");
+    }
+    return module;
+}
+
+void create_graphics_pipeline(VulkanState& vk) {
+    auto compiled_shaders = compile_slang_shader_source(TRIANGLE_SLANG_CODE);
+    VkShaderModule vs_module = create_shader_module(vk.device, compiled_shaders.vs_spirv);
+    VkShaderModule fs_module = create_shader_module(vk.device, compiled_shaders.fs_spirv);
+
+    VkPipelineShaderStageCreateInfo shader_stages[] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_VERTEX_BIT,
+            .module = vs_module,
+            .pName = "main",
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .module = fs_module,
+            .pName = "main",
+        },
+    };
+
+    VkVertexInputBindingDescription binding_description{
+        .binding = 0,
+        .stride = sizeof(Vertex),
+        .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+    };
+
+    VkVertexInputAttributeDescription attribute_descriptions[] = {
+        {
+            .location = 0,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32_SFLOAT,
+            .offset = static_cast<uint32_t>(offsetof(Vertex, pos)),
+        },
+        {
+            .location = 1,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32B32_SFLOAT,
+            .offset = static_cast<uint32_t>(offsetof(Vertex, color)),
+        },
+    };
+
+    VkPipelineVertexInputStateCreateInfo vertex_input_info{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .vertexBindingDescriptionCount = 1,
+        .pVertexBindingDescriptions = &binding_description,
+        .vertexAttributeDescriptionCount = 2,
+        .pVertexAttributeDescriptions = attribute_descriptions,
+    };
+
+    VkPipelineInputAssemblyStateCreateInfo input_assembly{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+        .primitiveRestartEnable = VK_FALSE,
+    };
+
+    VkPipelineViewportStateCreateInfo viewport_state{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .viewportCount = 1,
+        .scissorCount = 1,
+    };
+
+    VkPipelineRasterizationStateCreateInfo rasterizer{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .depthClampEnable = VK_FALSE,
+        .rasterizerDiscardEnable = VK_FALSE,
+        .polygonMode = VK_POLYGON_MODE_FILL,
+        .cullMode = VK_CULL_MODE_NONE,
+        .frontFace = VK_FRONT_FACE_CLOCKWISE,
+        .lineWidth = 1.0f,
+    };
+
+    VkPipelineMultisampleStateCreateInfo multisampling{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+        .sampleShadingEnable = VK_FALSE,
+    };
+
+    VkPipelineColorBlendAttachmentState color_blend_attachment{
+        .blendEnable = VK_FALSE,
+        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+    };
+
+    VkPipelineColorBlendStateCreateInfo color_blending{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .logicOpEnable = VK_FALSE,
+        .attachmentCount = 1,
+        .pAttachments = &color_blend_attachment,
+    };
+
+    VkDynamicState dynamic_states[] = {
+        VK_DYNAMIC_STATE_VIEWPORT,
+        VK_DYNAMIC_STATE_SCISSOR,
+    };
+
+    VkPipelineDynamicStateCreateInfo dynamic_state{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+        .dynamicStateCount = 2,
+        .pDynamicStates = dynamic_states,
+    };
+
+    VkPipelineLayoutCreateInfo pipeline_layout_info{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+    };
+
+    if (vkCreatePipelineLayout(vk.device, &pipeline_layout_info, nullptr, &vk.pipeline_layout) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create pipeline layout");
+    }
+
+    VkFormat color_format = VK_FORMAT_B8G8R8A8_UNORM;
+    VkPipelineRenderingCreateInfo pipeline_rendering_info{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+        .colorAttachmentCount = 1,
+        .pColorAttachmentFormats = &color_format,
+    };
+
+    VkGraphicsPipelineCreateInfo pipeline_info{
+        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .pNext = &pipeline_rendering_info,
+        .stageCount = 2,
+        .pStages = shader_stages,
+        .pVertexInputState = &vertex_input_info,
+        .pInputAssemblyState = &input_assembly,
+        .pViewportState = &viewport_state,
+        .pRasterizationState = &rasterizer,
+        .pMultisampleState = &multisampling,
+        .pColorBlendState = &color_blending,
+        .pDynamicState = &dynamic_state,
+        .layout = vk.pipeline_layout,
+        .renderPass = VK_NULL_HANDLE,
+    };
+
+    if (vkCreateGraphicsPipelines(vk.device, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &vk.pipeline) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create graphics pipeline for dynamic rendering");
+    }
+
+    vkDestroyShaderModule(vk.device, fs_module, nullptr);
+    vkDestroyShaderModule(vk.device, vs_module, nullptr);
+    std::println("Graphics pipeline created for Dynamic Rendering with Slang shaders.");
+}
+
 void create_command_resources(VulkanState& vk) {
     VkCommandPoolCreateInfo pool_info{
         .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
@@ -767,9 +1060,9 @@ void render_frame(WaylandState& wl, VulkanState& vk, std::chrono::steady_clock::
     float time_sec = std::chrono::duration<float>(now - start_time).count();
     VkClearColorValue clear_color = {
         .float32 = {
-            0.2f + 0.2f * std::sin(time_sec * 1.5f),
-            0.3f + 0.3f * std::sin(time_sec * 1.5f + 2.0f),
-            0.6f + 0.3f * std::sin(time_sec * 1.5f + 4.0f),
+            0.1f + 0.05f * std::sin(time_sec),
+            0.1f + 0.05f * std::sin(time_sec + 2.0f),
+            0.15f + 0.05f * std::sin(time_sec + 4.0f),
             1.0f
         }
     };
@@ -829,7 +1122,31 @@ void render_frame(WaylandState& wl, VulkanState& vk, std::chrono::steady_clock::
     };
 
     vkCmdBeginRendering(cmd, &rendering_info);
-    // Dynamic rendering render pass is active
+
+    // Draw RGB Triangle
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.pipeline);
+
+    VkViewport viewport{
+        .x = 0.0f,
+        .y = 0.0f,
+        .width = static_cast<float>(wl.width),
+        .height = static_cast<float>(wl.height),
+        .minDepth = 0.0f,
+        .maxDepth = 1.0f,
+    };
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+
+    VkRect2D scissor{
+        .offset = {0, 0},
+        .extent = {wl.width, wl.height},
+    };
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+    VkDeviceSize offsets[] = {0};
+    vkCmdBindVertexBuffers(cmd, 0, 1, &vk.vertex_buffer.buffer, offsets);
+
+    vkCmdDraw(cmd, static_cast<uint32_t>(TRIANGLE_VERTICES.size()), 1, 0, 0);
+
     vkCmdEndRendering(cmd);
 
     // Synchronization 2: Transition from COLOR_ATTACHMENT_OPTIMAL to GENERAL
@@ -912,6 +1229,22 @@ void cleanup_vulkan(VulkanState& vk) {
     if (vk.device != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(vk.device);
 
+        if (vk.pipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(vk.device, vk.pipeline, nullptr);
+            vk.pipeline = VK_NULL_HANDLE;
+        }
+
+        if (vk.pipeline_layout != VK_NULL_HANDLE) {
+            vkDestroyPipelineLayout(vk.device, vk.pipeline_layout, nullptr);
+            vk.pipeline_layout = VK_NULL_HANDLE;
+        }
+
+        if (vk.vertex_buffer.buffer != VK_NULL_HANDLE) {
+            vmaDestroyBuffer(vk.allocator, vk.vertex_buffer.buffer, vk.vertex_buffer.allocation);
+            vk.vertex_buffer.buffer = VK_NULL_HANDLE;
+            vk.vertex_buffer.allocation = VK_NULL_HANDLE;
+        }
+
         for (auto fence : vk.in_flight_fences) {
             if (fence != VK_NULL_HANDLE) vkDestroyFence(vk.device, fence, nullptr);
         }
@@ -978,7 +1311,7 @@ int main() {
     std::signal(SIGTERM, signal_handler);
 
     try {
-        std::println("Starting Vulkan Dma-buf explicit sync Wayland application (C++26)...");
+        std::println("Starting Vulkan Slang Triangle Wayland application (C++26)...");
 
         WaylandState wl{};
         init_wayland(wl);
@@ -990,9 +1323,11 @@ int main() {
         create_vma_allocator(vk);
         init_drm_syncobj_timelines(wl, vk);
         create_dmabuf_buffers(wl, vk);
+        create_vertex_buffer(vk);
+        create_graphics_pipeline(vk);
         create_command_resources(vk);
 
-        std::println("Initialization successful. Entering swapchain-less render loop...");
+        std::println("Initialization successful. Entering render loop...");
         std::fflush(stdout);
         auto start_time = std::chrono::steady_clock::now();
 
